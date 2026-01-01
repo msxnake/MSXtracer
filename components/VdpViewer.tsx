@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { VDPState } from '../types';
-import { X, Grid, Image, Binary, RefreshCw, Ghost } from 'lucide-react';
+import { X, Grid, Image, Binary, RefreshCw, Ghost, ArrowRight } from 'lucide-react';
 
 interface VdpViewerProps {
   vdpState: VDPState;
@@ -11,6 +11,8 @@ interface VdpViewerProps {
 export const VdpViewer: React.FC<VdpViewerProps> = ({ vdpState, onClose }) => {
   const [activeTab, setActiveTab] = useState<'SCREEN' | 'PATTERNS' | 'SPRITES' | 'MEM'>('SCREEN');
   const [forceUpdate, setForceUpdate] = useState(0); 
+  const [viewBaseAddress, setViewBaseAddress] = useState(0);
+  const [addressInput, setAddressInput] = useState("0000");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
   const PALETTE = [
@@ -21,7 +23,7 @@ export const VdpViewer: React.FC<VdpViewerProps> = ({ vdpState, onClose }) => {
     '#2020E0',   // 4 Dark Blue
     '#4060E0',   // 5 Light Blue
     '#A02020',   // 6 Dark Red
-    '#40C0E0',   // 7 Cyan
+    '#4060E0',   // 7 Cyan
     '#E02020',   // 8 Medium Red
     '#E06060',   // 9 Light Red
     '#C0C020',   // 10 Dark Yellow
@@ -194,71 +196,118 @@ export const VdpViewer: React.FC<VdpViewerProps> = ({ vdpState, onClose }) => {
   };
 
   const renderHexDump = () => {
-    const rows = 128; // Muestra 2KB de VRAM para evitar saturar el DOM
+    const rows = 128; // Show 2KB
     const currentPointer = vdpState.addressRegister & 0x3FFF;
 
+    const handleAddressSubmit = () => {
+        let val = parseInt(addressInput, 16);
+        if (isNaN(val)) val = 0;
+        val = val & 0x3FFF; // Clamp to 16KB
+        val = val & 0xFFF0; // Align to 16 bytes
+        setViewBaseAddress(val);
+        setAddressInput(val.toString(16).toUpperCase().padStart(4, '0'));
+    };
+
     return (
-      <div className="w-full font-mono text-[10px] text-gray-400 overflow-x-auto select-text custom-scrollbar">
-          <div className="min-w-max inline-block bg-black/50 rounded-sm">
-            <table className="border-collapse w-full">
-              <thead>
-                <tr className="bg-gray-900 text-gray-600 border-b border-gray-800">
-                  <th className="px-2 py-1 text-left font-bold sticky left-0 bg-gray-900 z-10">ADDR</th>
-                  <th className="px-2 py-1 text-center" colSpan={16}>DATA (0-F)</th>
-                  <th className="px-2 py-1 text-left border-l border-gray-800">ASCII</th>
-                </tr>
-              </thead>
-              <tbody>
-                  {[...Array(rows)].map((_, row) => {
-                      const addr = row * 16;
-                      const bytes = vdpState.vram.slice(addr, addr + 16);
-                      const ascii = bytes.map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
-                      
-                      return (
-                        <tr key={addr} className="hover:bg-blue-900/10 group border-b border-gray-900/30">
-                          <td className="px-2 py-0.5 text-blue-900 font-bold border-r border-gray-800 sticky left-0 bg-black group-hover:bg-gray-900 z-10">
-                            ${addr.toString(16).toUpperCase().padStart(4, '0')}
-                          </td>
-                          <td className="px-2 py-0.5 whitespace-nowrap">
-                            {bytes.map((b, i) => {
-                                const cellAddr = addr + i;
-                                const isPointer = cellAddr === currentPointer;
-                                return (
-                                  <span 
-                                    key={i} 
-                                    className={`inline-block w-4 text-center ${
-                                        isPointer ? 'bg-yellow-500 text-black font-bold rounded-sm' : 
-                                        (b === 0 ? 'text-gray-800' : 'text-gray-300')
-                                    } ${i === 7 ? 'mr-3' : 'mr-1'}`}
-                                  >
-                                    {b.toString(16).toUpperCase().padStart(2, '0')}
-                                  </span>
-                                );
-                            })}
-                          </td>
-                          <td className="px-2 py-0.5 text-gray-600 border-l border-gray-800 bg-gray-950/20 italic tracking-widest">
-                            {ascii}
-                          </td>
-                        </tr>
-                      );
-                  })}
-              </tbody>
-            </table>
+      <div className="w-full h-full bg-[#090909] font-mono text-[11px] overflow-hidden flex flex-col border border-gray-900 rounded">
+          {/* Status Bar / Footer style Header */}
+          <div className="bg-[#2d2d2d] text-gray-300 px-3 py-1.5 text-[11px] flex items-center gap-4 border-b border-black font-sans shadow-sm flex-shrink-0">
+              <span className="font-bold text-gray-400">View Addr</span>
+              
+              <div className="flex items-center bg-gray-800 border border-gray-600 rounded overflow-hidden">
+                <span className="text-gray-500 pl-1.5 pr-0.5 text-[10px]">0x</span>
+                <input 
+                    type="text"
+                    value={addressInput}
+                    onChange={(e) => setAddressInput(e.target.value)}
+                    onBlur={handleAddressSubmit}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddressSubmit()}
+                    className="bg-transparent border-none outline-none text-white text-[11px] font-mono w-10 py-0.5 focus:bg-gray-700 transition-colors"
+                />
+              </div>
+
+              <div className="h-4 w-px bg-gray-600 mx-2"></div>
+              
+              <span className="font-bold text-gray-400">VDP Ptr</span>
+              <div className="flex items-center gap-1 text-yellow-500 font-mono">
+                  <ArrowRight size={10} />
+                  <span>0x{vdpState.addressRegister.toString(16).toUpperCase().padStart(4, '0')}</span>
+              </div>
+
+              <span className="ml-auto opacity-50 text-gray-500 cursor-help" title="Enter Hex Address to Jump">(Type & Enter)</span>
           </div>
-          {vdpState.vram.length > rows * 16 && (
-            <div className="p-2 text-[9px] text-gray-600 text-center italic">
-              * Showing first 2KB of VRAM. Full dump available in emulator builds.
+
+          <div className="flex-1 overflow-auto custom-scrollbar bg-[#050505]">
+            <div className="inline-block min-w-full p-2">
+                {Array.from({ length: rows }).map((_, rowIndex) => {
+                    const rowAddr = viewBaseAddress + (rowIndex * 16);
+                    if (rowAddr >= 16384) return null; // Out of VRAM bounds
+
+                    const bytes = vdpState.vram.slice(rowAddr, rowAddr + 16);
+                    
+                    const asciiStr = bytes.map(b => {
+                        return (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.';
+                    }).join('');
+
+                    return (
+                        <div key={rowIndex} className="flex hover:bg-[#1a1a1a] group leading-5 min-w-max">
+                            {/* Address */}
+                            <div className="text-gray-500 w-[50px] flex-shrink-0 select-none opacity-80 group-hover:opacity-100 group-hover:text-gray-400">
+                                {rowAddr.toString(16).toUpperCase().padStart(4, '0')}:
+                            </div>
+
+                            {/* Hex Data */}
+                            <div className="flex gap-2 mr-4 text-gray-300 select-text">
+                                {/* First 8 bytes */}
+                                <div className="flex gap-1.5">
+                                    {bytes.slice(0, 8).map((b, colIndex) => {
+                                        const addr = rowAddr + colIndex;
+                                        const isSelected = addr === currentPointer;
+                                        return (
+                                            <span key={colIndex} className={`w-[14px] text-center ${b === 0 ? 'text-gray-700' : 'text-gray-300'} ${isSelected ? 'bg-yellow-600 text-black font-bold rounded-sm' : ''}`}>
+                                                {b.toString(16).toUpperCase().padStart(2, '0')}
+                                            </span>
+                                        );
+                                    })}
+                                </div>
+                                
+                                {/* Second 8 bytes */}
+                                <div className="flex gap-1.5 border-l border-gray-800 pl-2">
+                                    {bytes.slice(8, 16).map((b, colIndex) => {
+                                        const addr = rowAddr + 8 + colIndex;
+                                        const isSelected = addr === currentPointer;
+                                        return (
+                                            <span key={colIndex} className={`w-[14px] text-center ${b === 0 ? 'text-gray-700' : 'text-gray-300'} ${isSelected ? 'bg-yellow-600 text-black font-bold rounded-sm' : ''}`}>
+                                                {b.toString(16).toUpperCase().padStart(2, '0')}
+                                            </span>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+
+                            {/* ASCII */}
+                            <div className="text-gray-500 border-l border-gray-800 pl-4 tracking-[0.15em] select-text group-hover:text-gray-300 opacity-80">
+                                {asciiStr}
+                            </div>
+                        </div>
+                    );
+                })}
             </div>
-          )}
+             {viewBaseAddress + (rows * 16) < 16384 && (
+                <div className="p-2 text-center text-gray-700 italic text-[9px] border-t border-gray-900 bg-[#0a0a0a]">
+                    ...
+                </div>
+            )}
+          </div>
       </div>
     );
   };
 
   return (
-    <div className="absolute inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center animate-fade-in p-2 md:p-4">
-       <div className="bg-[#1a1a1a] rounded-lg shadow-2xl border border-gray-700 w-full max-w-4xl flex flex-col overflow-hidden max-h-[95vh]">
+    <div className="absolute inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center animate-fade-in p-1 md:p-2">
+       <div className="bg-[#1a1a1a] rounded-lg shadow-2xl border border-gray-700 w-[98vw] h-[98vh] max-w-none max-h-none flex flex-col overflow-hidden">
           {/* Header */}
-          <div className="bg-[#252526] p-3 flex justify-between items-center border-b border-gray-800">
+          <div className="bg-[#252526] p-3 flex justify-between items-center border-b border-gray-800 flex-shrink-0">
              <div className="flex items-center gap-2 text-gray-200">
                 <Image size={18} className="text-blue-400" />
                 <h2 className="font-bold text-sm tracking-wide uppercase">VDP MONITOR</h2>
@@ -272,7 +321,7 @@ export const VdpViewer: React.FC<VdpViewerProps> = ({ vdpState, onClose }) => {
           </div>
 
           {/* Controls */}
-          <div className="bg-[#111] p-2 flex gap-1 md:gap-2 border-b border-gray-800 overflow-x-auto no-scrollbar">
+          <div className="bg-[#111] p-2 flex gap-1 md:gap-2 border-b border-gray-800 overflow-x-auto no-scrollbar flex-shrink-0">
               <button onClick={() => setActiveTab('SCREEN')} className={`px-2 md:px-3 py-1 text-[10px] md:text-xs rounded font-bold flex items-center gap-2 transition-all flex-shrink-0 ${activeTab === 'SCREEN' ? 'bg-blue-600 text-white shadow-lg' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
                   <Image size={14} /> Screen View
               </button>
@@ -288,9 +337,9 @@ export const VdpViewer: React.FC<VdpViewerProps> = ({ vdpState, onClose }) => {
           </div>
 
           {/* Content */}
-          <div className="flex-1 bg-[#0a0a0a] overflow-hidden flex flex-col lg:flex-row">
-              <div className="p-2 md:p-4 flex flex-col gap-4 border-b lg:border-b-0 lg:border-r border-gray-800 bg-black flex-shrink-0 items-center justify-center">
-                  <div className="border-4 border-gray-800 rounded shadow-2xl bg-black overflow-hidden flex items-center justify-center">
+          <div className="flex-1 bg-[#0a0a0a] overflow-hidden flex flex-col lg:flex-row min-h-0">
+              <div className="p-2 md:p-4 flex flex-col gap-4 border-b lg:border-b-0 lg:border-r border-gray-800 bg-black flex-shrink-0 items-center justify-center overflow-auto">
+                  <div className="border-4 border-gray-800 rounded shadow-2xl bg-black overflow-hidden flex items-center justify-center flex-shrink-0">
                     <canvas ref={canvasRef} width={256} height={192} className="image-pixelated w-[256px] sm:w-[384px] md:w-[480px] h-auto" style={{ imageRendering: 'pixelated' }} />
                   </div>
                   <div className="flex justify-between w-full text-[10px] text-gray-500 font-mono">
@@ -332,7 +381,7 @@ export const VdpViewer: React.FC<VdpViewerProps> = ({ vdpState, onClose }) => {
           </div>
           
           {/* Footer Info */}
-          <div className="bg-[#111] p-2 border-t border-gray-800 flex justify-between text-[10px] text-gray-500 font-mono">
+          <div className="bg-[#111] p-2 border-t border-gray-800 flex justify-between text-[10px] text-gray-500 font-mono flex-shrink-0">
              <div className="hidden sm:flex gap-4">
                 <span>PGT: $0000</span>
                 <span>PNT: $1800</span>

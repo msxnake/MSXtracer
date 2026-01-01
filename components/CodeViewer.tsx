@@ -154,6 +154,8 @@ export const CodeViewer: React.FC<CodeViewerProps> = ({ appState, onToggleBreakp
             const isActive = lineNum === activeLineNumber;
             const isBreakpoint = appState.breakpoints.has(lineNum);
             const isEditingThis = editingLine === lineNum;
+            const address = appState.analysis?.lineAddresses[lineNum];
+            const addrString = address !== undefined ? address.toString(16).toUpperCase().padStart(4, '0') : '';
             
             let infoTag = null;
 
@@ -241,15 +243,16 @@ export const CodeViewer: React.FC<CodeViewerProps> = ({ appState, onToggleBreakp
                 className={`flex group h-6 items-center font-mono text-sm relative ${isActive ? 'bg-blue-900/30' : 'hover:bg-gray-900/50'}`}
                 onDoubleClick={() => !isEditingThis && handleLineDoubleClick(lineNum, line)}
               >
-                {/* Gutter */}
+                {/* Gutter: Line Number + Address */}
                 <div 
-                  className={`w-12 flex-shrink-0 text-right pr-4 select-none cursor-pointer border-r border-gray-800 mr-4 flex items-center justify-end gap-1 ${
+                  className={`w-20 flex-shrink-0 text-right pr-3 select-none cursor-pointer border-r border-gray-800 mr-3 flex items-center justify-end gap-2 bg-[#0d0d0d] h-full ${
                     isActive ? 'text-blue-400 font-bold' : 'text-gray-700'
                   }`}
                   onClick={() => onToggleBreakpoint(lineNum)}
                 >
-                  {isBreakpoint && <div className="w-2 h-2 bg-red-600 rounded-full shrink-0 shadow-[0_0_5px_red]" />}
-                  <span>{lineNum}</span>
+                  {isBreakpoint && <div className="w-1.5 h-1.5 bg-red-600 rounded-full shrink-0 shadow-[0_0_5px_red]" />}
+                  <span className="w-8">{lineNum}</span>
+                  <span className={`text-[10px] font-mono w-8 text-center ${isActive ? 'text-gray-400' : 'text-gray-800'}`}>{addrString}</span>
                 </div>
                 
                 {/* Code or Editor */}

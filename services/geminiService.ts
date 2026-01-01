@@ -126,35 +126,70 @@ const parseLineComponents = (line: string) => {
     const clean = line.split(';')[0].trim();
     if (!clean) return null;
 
-    const parts = clean.split(/\s+/);
-    let labelCandidate = "";
+    let processingLine = clean;
+    const labels: string[] = [];
     let directive = "";
     let args = "";
 
-    if (parts[0].endsWith(':')) {
-        labelCandidate = parts[0].slice(0, -1);
-        const remainder = clean.substring(parts[0].length).trim();
-        const remParts = remainder.split(/\s+/);
-        if (remParts.length > 0) {
-            directive = remParts[0].toUpperCase();
-            args = remainder.substring(directive.length).trim();
-        }
-    } else {
-        const first = parts[0].toUpperCase();
-        if (!VALID_MNEMONICS.has(first) && !DIRECTIVES.includes(first)) {
-            labelCandidate = parts[0];
-            const remainder = clean.substring(parts[0].length).trim();
-            const remParts = remainder.split(/\s+/);
-            if (remParts.length > 0) {
-                directive = remParts[0].toUpperCase();
-                args = remainder.substring(directive.length).trim();
-            }
+    // 1. Recursively consume labels ending in ':' (Aliasing support)
+    // E.g., "LABEL1: LABEL2: OPCODE"
+    let hasColonLabel = false;
+    while (true) {
+        const parts = processingLine.split(/\s+/);
+        if (parts.length > 0 && parts[0].endsWith(':')) {
+            labels.push(parts[0].slice(0, -1));
+            processingLine = processingLine.substring(parts[0].length).trim();
+            hasColonLabel = true;
+            if (!processingLine) break;
         } else {
-            directive = first;
-            args = clean.substring(directive.length).trim();
+            break;
         }
     }
-    return { label: labelCandidate, directive, args };
+
+    // 2. Process what remains (Instruction, Directive, or Label without colon)
+    if (processingLine) {
+        const parts = processingLine.split(/\s+/);
+        const first = parts[0].toUpperCase();
+
+        // Check if the remaining first word is a known Opcode or Directive
+        if (VALID_MNEMONICS.has(first) || DIRECTIVES.includes(first)) {
+            directive = first;
+            args = processingLine.substring(directive.length).trim();
+        } else {
+            // It's ambiguous: could be a Label without colon, OR a Macro/Instruction
+            const remainder = processingLine.substring(parts[0].length).trim();
+            const remParts = remainder.split(/\s+/);
+            const nextIsOpcode = remParts.length > 0 && (VALID_MNEMONICS.has(remParts[0].toUpperCase()) || DIRECTIVES.includes(remParts[0].toUpperCase()));
+
+            if (nextIsOpcode) {
+                 // CASE: "LABEL1 OPCODE ARGS" (Label1 is an alias without colon)
+                 labels.push(parts[0]);
+                 directive = remParts[0].toUpperCase();
+                 args = remainder.substring(directive.length).trim();
+            }
+            else if (remainder.length > 0) {
+                 // CASE: "MACRO ARGS" (Unknown opcode with args -> Treat as Macro/Instruction)
+                 directive = first;
+                 args = remainder;
+            }
+            else {
+                 // CASE: "SINGLE_WORD"
+                 if (hasColonLabel) {
+                     // We already have a label ending in colon on this line. 
+                     // It is extremely unlikely to have "LABEL: LABEL2" (two labels, second without colon).
+                     // It is much more likely "LABEL: MACRO".
+                     // Treat as 0-arg Macro/Instruction
+                     directive = first;
+                     args = "";
+                 } else {
+                     // "LABEL" (No colon, single word line) - Treat as Alias
+                     labels.push(parts[0]);
+                 }
+            }
+        }
+    }
+
+    return { labels, directive, args };
 };
 
 export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
@@ -181,41 +216,43 @@ export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
       const lineNum = idx + 1;
       const comp = parseLineComponents(line);
       
-      // Map current address to this line (even if empty, close enough for jumps)
-      if (comp) {
-          lineAddresses[lineNum] = currentAddress;
-      }
-
       if (!comp) return;
-      const { label, directive, args } = comp;
+      const { labels: lineLabels, directive, args } = comp;
 
       // Detect ROM Header
       if (/db\s+(["']AB["']|#41|#42|\$41|\$42|41h|42h)/i.test(line)) {
           if (!initLabel) initLabel = "ROM_HEADER"; 
       }
 
-      // Handle Label Definition
-      if (label) {
-          const upLabel = label.toUpperCase();
-          if (directive === 'EQU') {
-              const val = resolve(args);
-              if (val !== null) {
-                  constants.push({ name: upLabel, value: val, hex: '$' + val.toString(16).toUpperCase() });
-                  symbolTable[upLabel] = val;
-              }
-          } else {
-              labels[upLabel] = lineNum; // Visual Line Number
-              symbolTable[upLabel] = currentAddress;
-          }
-      }
-
-      // Handle Address Directives
+      // 1. Handle Directives that change Address OR represent Values (EQU)
       if (directive === 'ORG') {
           const addr = resolve(args);
           if (addr !== null) currentAddress = addr;
-          // Update line address if ORG changes it
-          lineAddresses[lineNum] = currentAddress; 
-      } else {
+          lineAddresses[lineNum] = currentAddress;
+      }
+      else if (directive === 'EQU') {
+          // For EQU, the "Address" displayed is the Value
+          const val = resolve(args);
+          if (val !== null) {
+              lineAddresses[lineNum] = val;
+              // Register ALL aliases for this EQU
+              lineLabels.forEach(label => {
+                  const upLabel = label.toUpperCase();
+                  constants.push({ name: upLabel, value: val, hex: '$' + val.toString(16).toUpperCase() });
+                  symbolTable[upLabel] = val;
+              });
+          }
+      }
+      else {
+          // Standard Instruction or DB/DW
+          lineAddresses[lineNum] = currentAddress;
+          
+          lineLabels.forEach(label => {
+              const upLabel = label.toUpperCase();
+              labels[upLabel] = lineNum; // Visual Line Number
+              symbolTable[upLabel] = currentAddress;
+          });
+
           currentAddress += getEntitySize(directive, args);
       }
   });
@@ -228,7 +265,7 @@ export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
   lines.forEach((line, idx) => {
       const comp = parseLineComponents(line);
       if (!comp) return;
-      const { label, directive, args } = comp;
+      const { labels: lineLabels, directive, args } = comp;
 
       if (directive === 'ORG') {
           const addr = resolve(args);
@@ -256,14 +293,15 @@ export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
             }
         });
         
-        if (label) {
+        // Register variables for ALL labels on this line
+        lineLabels.forEach(label => {
             initialVariables.push({
                 name: label.toUpperCase(),
                 value: memoryMap[currentAddress] || 0,
                 address: '$' + currentAddress.toString(16).toUpperCase(),
                 lastModifiedStepId: 0
             });
-        }
+        });
         currentAddress += offset;
       }
       else if (directive === 'DW' || directive === 'DEFW') {
@@ -278,7 +316,7 @@ export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
              offset += 2;
         });
 
-        if (label) {
+        lineLabels.forEach(label => {
              const valLow = memoryMap[currentAddress] || 0;
              const valHigh = memoryMap[currentAddress+1] || 0;
              initialVariables.push({
@@ -287,7 +325,7 @@ export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
                 address: '$' + currentAddress.toString(16).toUpperCase(),
                 lastModifiedStepId: 0
             });
-        }
+        });
         currentAddress += offset;
       }
       else {
@@ -295,7 +333,7 @@ export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
       }
   });
 
-  // Re-Pass for Variables check (Aliases)
+  // Re-Pass for Variables check (Aliases defined outside DB/DW lines but pointing to data)
   Object.keys(labels).forEach(label => {
       const addr = symbolTable[label];
       if (!initialVariables.find(v => v.name === label) && !constants.find(c => c.name === label)) {
@@ -316,6 +354,8 @@ export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
       const [name, line] = sortedByLine[i];
       const [nextName, nextLine] = sortedByLine[i+1];
       
+      // Ignore if they are on the same line (explicit aliasing)
+      if (line === nextLine) continue;
       if (constants.find(c => c.name === name)) continue;
       
       const addr = symbolTable[name];
@@ -341,8 +381,8 @@ export const analyzeZ80Code = async (code: string): Promise<AnalysisResult> => {
     if (!comp) continue;
     const { directive, args } = comp;
 
-    // Filter only Instructions
-    if (!directive || !VALID_MNEMONICS.has(directive) || DIRECTIVES.includes(directive)) {
+    // Filter directives (EQU, DB, etc). Allow Unknown Directives (Macros/Custom instructions) to pass through as Instructions.
+    if (!directive || DIRECTIVES.includes(directive)) {
         continue;
     }
     

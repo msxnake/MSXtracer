@@ -1,0 +1,45 @@
+# MEMORIA DE ESTILO Y BUENAS PRÁCTICAS (PROYECTO MSX/RETRO)
+
+## 1. ESTÉTICA Y UI (Tailwind CSS)
+- **Tema:** Dark Mode agresivo y profesional. Fondos `#111`, `#0a0a0a`.
+- **Paleta:** Acentos de color semántico (Azul=Info, Verde=Éxito/Memoria, Rojo=Bug/Stack, Amarillo=Flags/Registros).
+- **Tipografía:** `font-mono` para todo lo relacionado con código, direcciones y valores. `text-xs` o `text-[10px]` para interfaces densas.
+- **Scrollbars:** SIEMPRE personalizar scrollbars (estilo retro/fino).
+  ```css
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #3b82f6; border-radius: 2px; }
+  ::-webkit-scrollbar-track { background: #1e1e1e; }
+  ```
+- **Interactividad:** Hover effects sutiles (`hover:bg-gray-800`), cursores pointer en elementos clickeables.
+- **Iconos:** Usar `lucide-react` para todo. Tamaño pequeño (12-16px).
+
+## 2. LÓGICA Y TYPESCRIPT
+- **Tipado:** Interfaces estrictas (`interface Z80Registers`, `enum StepType`). NUNCA usar `any` si se puede evitar.
+- **Manejo de Memoria:**
+  - Respetar Little Endian (Low byte, High byte).
+  - Usar operaciones bitwise explícitas (`& 0xFF`, `& 0xFFFF`) para asegurar integridad de datos.
+  - Funciones helper para hex: `h8(val)`, `h16(val)`.
+- **Simulación:** Separar la lógica de simulación (`services/`) de la vista (`components/`).
+
+## 3. COMPONENTES ESPECÍFICOS
+- **Visualización de Datos:**
+  - Hex Dumps con ASCII a la derecha.
+  - Visualización de Stack relativa al SP (mostrando Words de 16-bit, no bytes sueltos).
+  - Listas virtuales o renderizado eficiente para logs largos.
+- **Edición:** Permitir doble click para editar valores (registros, memoria) o código.
+
+## 4. ESTRUCTURA DE ARCHIVOS
+- `types.ts`: Definiciones globales.
+- `services/`: Lógica pura (parsers, simuladores).
+- `components/`: UI tonta o semi-inteligente.
+
+## 5. REGLAS DE ORO
+- **ESTABILIDAD:** No modificar código que ya funciona correctamente a menos que sea estrictamente necesario.
+- **PARSING ROBUSTO:** El parser de ASM debe soportar alias de etiquetas en la misma línea (`LABEL1: LABEL2: OPCODE`) sin ignorar la instrucción.
+- Si hay un bucle infinito potencial, poner límites de seguridad (`maxSteps`).
+- Si se muestra una dirección de memoria, mostrar su valor hexadecimal formateado.
+- Feedback visual inmediato (animaciones sutiles o cambios de color al actualizar valores).
+
+## 6. COMUNICACIÓN Y FLUJO DE TRABAJO
+- **Consultar Dudas:** Si existen 2 o más opciones viables de implementación o diseño, PREGUNTAR AL USUARIO sus preferencias antes de escribir código.
+- **Evolución:** Actualizar este archivo si cambian las preferencias estéticas o funcionales.

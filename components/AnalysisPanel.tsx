@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { AppState, StepType, Z80Flags, Z80Registers } from '../types';
 import { Activity, Database, List, Tag, Cpu, Flag, Repeat, ArrowRight, Layers, Hash } from 'lucide-react';
@@ -26,16 +25,16 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
   const h8 = (val: number) => (val || 0).toString(16).toUpperCase().padStart(2, '0');
   // Helper to format Hex 16-bit
   const h16 = (high: number, low: number) => ((high << 8) | low).toString(16).toUpperCase().padStart(4, '0');
+  // Helper for single number 16-bit
+  const h16val = (val: number) => (val || 0).toString(16).toUpperCase().padStart(4, '0');
 
   const editRegister = (reg: keyof Z80Registers, currentVal: number) => {
     const newVal = prompt(`Edit ${reg.toUpperCase()} Register (Hex or Decimal):`, currentVal.toString(16).toUpperCase());
     if (newVal !== null) {
       let val = parseInt(newVal, newVal.trim().startsWith('$') || newVal.trim().startsWith('#') || newVal.trim().match(/^[0-9A-F]+$/i) ? 16 : 10);
-      // Try to detect hex if user didn't specify prefix but used A-F
       if (isNaN(val) && /^[0-9A-Fa-f]+$/.test(newVal.trim())) {
          val = parseInt(newVal, 16);
       }
-      
       if (!isNaN(val)) {
         onRegisterChange(reg, val);
       }
@@ -45,9 +44,8 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
   const editPair = (highReg: keyof Z80Registers, lowReg: keyof Z80Registers, currentVal: number) => {
       const newVal = prompt(`Edit ${highReg.toUpperCase()}${lowReg.toUpperCase()} Pair (Hex or Decimal):`, currentVal.toString(16).toUpperCase().padStart(4,'0'));
       if (newVal !== null) {
-           let val = parseInt(newVal, 16); // Default to hex for pairs usually
+           let val = parseInt(newVal, 16); 
            if (isNaN(val)) val = parseInt(newVal);
-           
            if (!isNaN(val)) {
                onRegisterChange(highReg, (val >> 8) & 0xFF);
                onRegisterChange(lowReg, val & 0xFF);
@@ -55,32 +53,31 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
       }
   }
 
-  // --- MEMORY LOOKUP HELPER ---
-  const readMemoryAtHL = (): number => {
-      const addr = (liveRegisters.h << 8) | liveRegisters.l;
-      
-      // 1. Try Live Memory (Stack/Raw)
+  // --- MEMORY LOOKUP HELPERS ---
+  const readByte = (addr: number): number => {
+      // 1. Try Live Memory (Simulator writes STACK:addr for all RAM writes)
       const stackKey = `STACK:${addr}`;
       if (liveMemory[stackKey] !== undefined) return liveMemory[stackKey];
-
-      // 2. Try Live Memory (Labels)
-      if (analysis.symbolTable) {
-          const labelEntry = Object.entries(analysis.symbolTable).find(([_, val]) => val === addr);
-          if (labelEntry) {
-              const labelName = labelEntry[0];
-              if (liveMemory[labelName] !== undefined) return liveMemory[labelName];
-          }
-      }
-
-      // 3. Try Static Map
+      
+      // 2. Try Static Map
       if (analysis.memoryMap && analysis.memoryMap[addr] !== undefined) {
           return analysis.memoryMap[addr];
       }
       return 0;
   };
 
-  const hlValueContent = readMemoryAtHL();
+  const readWord = (addr: number): number => {
+      const low = readByte(addr);
+      const high = readByte((addr + 1) & 0xFFFF);
+      return (high << 8) | low;
+  };
 
+  const readMemoryAtHL = (): number => {
+      const addr = (liveRegisters.h << 8) | liveRegisters.l;
+      return readByte(addr);
+  };
+
+  const hlValueContent = readMemoryAtHL();
 
   // --- MERGE STATIC VAR INFO WITH LIVE MEMORY ---
   const memoryVariables = analysis.initialVariables.map(v => {
@@ -102,21 +99,21 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
   const bugCount = analysis.detectedBugs.length;
   const callCount = analysis.steps.filter(s => s.type === StepType.CALL).length;
 
-  // Stack Visualization
-  const stackItems = Object.keys(liveMemory)
-    .filter(k => k.startsWith('STACK:'))
-    .map(k => {
-        const addr = parseInt(k.split(':')[1]);
-        return { addr, val: liveMemory[k] };
-    })
-    .sort((a, b) => a.addr - b.addr); // Show low to high
+  // --- STACK VISUALIZATION (SP Relative) ---
+  const sp = liveRegisters.sp;
+  const stackWords: { addr: number, val: number }[] = [];
+  // Show 12 words starting from SP
+  for (let i = 0; i < 12; i++) {
+      const addr = (sp + i * 2) & 0xFFFF;
+      const val = readWord(addr);
+      stackWords.push({ addr, val });
+  }
 
   // Jump to Line Function
   const jumpToLine = (lineNumber: number) => {
      const el = document.getElementById(`code-line-${lineNumber}`);
      if (el) {
          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-         // Create a visual flash effect
          el.classList.add('bg-blue-900', 'bg-opacity-50', 'transition-colors', 'duration-500');
          setTimeout(() => {
              el.classList.remove('bg-blue-900', 'bg-opacity-50', 'transition-colors', 'duration-500');
@@ -338,23 +335,34 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
         </div>
       ) : activeTab === 'STACK' ? (
          <div className="flex-1 overflow-y-auto custom-scrollbar bg-[#0d0d0d]">
-             {stackItems.length === 0 ? (
-                 <div className="p-8 text-center text-gray-600 flex flex-col items-center">
-                   <Layers size={32} className="mb-3 opacity-20" />
-                   <p className="text-xs">Stack is empty or not yet simulated.</p>
+             <div className="p-4 space-y-1">
+                 {/* Header to explain SP relative view */}
+                 <div className="flex justify-between text-[10px] text-gray-500 border-b border-gray-800 pb-1 mb-2">
+                     <span>ADDRESS (SP)</span>
+                     <span>VALUE (16-BIT)</span>
                  </div>
-             ) : (
-                <div className="p-4 space-y-1">
-                   {stackItems.map((item) => (
-                       <div key={item.addr} className={`flex items-center justify-between p-2 rounded border border-gray-800 bg-[#1a1a1a] font-mono text-xs ${
-                           item.addr === liveRegisters.sp || item.addr === liveRegisters.sp + 1 ? 'border-red-500' : ''
-                       }`}>
-                          <div className="text-red-400 font-bold">${item.addr.toString(16).toUpperCase()}</div>
-                          <div className="text-white">${item.val.toString(16).toUpperCase().padStart(2,'0')}</div>
-                       </div>
-                   ))}
-                </div>
-             )}
+                 
+                 {stackWords.map((item, idx) => {
+                     const isSp = idx === 0; // First item is always SP in this view
+                     return (
+                         <div key={item.addr} className={`flex items-center justify-between p-2 rounded border bg-[#1a1a1a] font-mono text-xs transition-all ${
+                             isSp ? 'border-red-500 bg-red-900/10 shadow-[inset_0_0_10px_rgba(239,68,68,0.2)]' : 'border-gray-800'
+                         }`}>
+                            <div className="flex items-center gap-2">
+                                {isSp && <ArrowRight size={10} className="text-red-500" />}
+                                <div className={`${isSp ? 'text-red-400 font-bold' : 'text-gray-500'}`}>${h16val(item.addr)}</div>
+                                {isSp && <span className="text-[9px] text-red-500 uppercase tracking-tighter">TOP</span>}
+                            </div>
+                            <div className="text-white font-bold tracking-wider">
+                                ${h16val(item.val)}
+                            </div>
+                         </div>
+                     );
+                 })}
+                 <div className="text-center mt-4 text-[9px] text-gray-600 italic">
+                     Displaying top 12 words from SP
+                 </div>
+             </div>
          </div>
       ) : activeTab === 'MEM' ? (
         <div className="flex-1 overflow-y-auto custom-scrollbar bg-[#0d0d0d]">
@@ -390,7 +398,11 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
                        </div>
                        <div className="flex flex-col items-end">
                           <span className={`font-bold ${isModified ? 'text-green-400' : 'text-blue-300'}`}>
-                            ${variable.value.toString(16).toUpperCase().padStart(2, '0')}
+                            {/* Improved: Show 4 digits if value > 255 to distinguish Words from Bytes */}
+                            ${variable.value > 0xFF 
+                                ? variable.value.toString(16).toUpperCase().padStart(4, '0') 
+                                : variable.value.toString(16).toUpperCase().padStart(2, '0')
+                             }
                           </span>
                           <span className="text-[9px] text-gray-500">
                             DEC: {variable.value}
