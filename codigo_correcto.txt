@@ -1,0 +1,3 @@
+# Registro de acciones correctas
+# Usa este archivo para documentar cambios correctos y decisiones aprobadas.
+# Formato sugerido: Fecha - Cambio - Motivo breve

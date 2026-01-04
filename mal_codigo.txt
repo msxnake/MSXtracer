@@ -1,0 +1,4 @@
+# Lista de acciones prohibidas
+# Usa este archivo para detallar cosas que NO debo hacer.
+# Formato sugerido: Regla - Motivo breve
+Regla 1: No ejecutar una peticion si hay varias formas sin preguntarte primero - Necesito tu preferencia antes de decidir.

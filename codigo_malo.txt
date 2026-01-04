@@ -1,0 +1,26 @@
+# ANTI-PATRONES Y CÓDIGO A EVITAR
+
+## 1. ESTÉTICA
+- **Scrollbars Nativos:** No dejar los scrollbars por defecto del navegador (rompen la inmersión de app de escritorio/retro).
+- **Colores Claros:** Evitar fondos blancos (`bg-white`) a menos que sea una necesidad específica.
+- **Espaciado Excesivo:** En herramientas de depuración, la densidad de información es buena. No usar `p-8` o `m-8` si `p-2` basta.
+- **Fuentes Sans-Serif en Datos:** Los números hexadecimales y direcciones deben ser siempre `font-mono`.
+
+## 2. LÓGICA ERRÓNEA
+- **Confusión Byte/Word:** Mostrar el Stack como una lista de Bytes (8-bit) cuando lógicamente guarda direcciones de retorno (16-bit).
+- **Asumir Tipos:** No validar si una propiedad existe antes de acceder (`appState.analysis.steps` sin comprobar `appState.analysis`).
+- **Números Mágicos:** Usar `16384` sin contexto (mejor `0x4000` o constantes).
+- **Falta de Bitwise:** Sumar direcciones sin hacer clamp (`addr + 1` en lugar de `(addr + 1) & 0xFFFF`), causando desbordamientos no controlados.
+
+## 3. UX DEFICIENTE
+- **Logs Estáticos:** Listas de pasos que no hacen scroll automático al paso actual.
+- **Falta de Feedback:** Botones que no parecen deshabilitados cuando no se pueden usar.
+- **Inputs sin Validación:** Permitir al usuario escribir cualquier cosa en un campo hexadecimal sin parsearlo correctamente.
+
+## 4. GENERAL
+- Componentes monolíticos de más de 500 líneas (romper en sub-componentes).
+- No manejar la carga de archivos (`FileReader`) de forma robusta.
+- **Refactorización Innecesaria:** Cambiar la estructura de un componente que ya cumple su función solo por "limpieza", introduciendo bugs potenciales.
+
+## 5. COMUNICACIÓN
+- **Suposiciones:** Implementar una característica compleja con varias alternativas de diseño sin consultar al usuario primero.

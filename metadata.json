@@ -1,0 +1,5 @@
+{
+  "name": "Msx tracer definitive",
+  "description": "A Z80 Assembly code analyzer for MSX that simulates execution flow, detects infinite loops, and identifies logic bugs using Gemini AI.",
+  "requestFramePermissions": []
+}

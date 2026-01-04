@@ -1,0 +1,4 @@
+- `main.asm` structure: ROM header with `"AB"` + `dw Execute` + 12 zero bytes is valid minimal INIT-only header; add `STATEMENT/DEVICE/TEXT` vectors only if needed.
+- `org #4000` for ROM, code/data in ROM, then pad to 16KB boundary with `ds ((($-1)/#4000)+1)*#4000-$` before RAM section.
+- `org #c000` with `ds virtual` is correct for RAM declarations (does not emit into ROM).
+- `move_ROMpage2_to_memorypage1` assumes BIOS/ROM/ROM/RAM paging; make sure ROM size matches that layout.
