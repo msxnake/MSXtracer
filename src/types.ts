@@ -82,14 +82,39 @@ export interface Z80Flags {
 }
 
 export interface Z80Registers {
+  // Main registers
   a: number;
+  f: number;  // Flags register (8-bit)
   b: number;
   c: number;
   d: number;
   e: number;
   h: number;
   l: number;
-  sp: number; // Stack Pointer
+
+  // Alternate register set (shadow registers)
+  a_prime: number;  // A'
+  f_prime: number;  // F'
+  b_prime: number;  // B'
+  c_prime: number;  // C'
+  d_prime: number;  // D'
+  e_prime: number;  // E'
+  h_prime: number;  // H'
+  l_prime: number;  // L'
+
+  // Index registers
+  ix: number;  // Index Register X (16-bit)
+  iy: number;  // Index Register Y (16-bit)
+
+  // Special purpose registers
+  i: number;   // Interrupt Vector Register
+  r: number;   // Memory Refresh Register
+
+  // Stack Pointer
+  sp: number;  // Stack Pointer (16-bit)
+
+  // Program Counter (for reference, though usually tracked separately)
+  pc: number;  // Program Counter (16-bit)
 }
 
 export interface VDPState {
@@ -135,17 +160,17 @@ export interface AppState {
   error: string | null;
   analysis: AnalysisResult | null;
   currentStepIndex: number;
-  
+
   // Interactive State
   isEditing: boolean; // Toggle editor
   isPlaying: boolean; // Auto-run mode
   breakpoints: Set<number>; // Line numbers
   showVDP: boolean; // Show VDP Dialog
-  
+
   // Recursive Navigation State
   manualLine: number | null; // If not null, we are stepping manually at this line number (off-road)
   callStack: StackFrame[]; // Stack history for Step In/Out
-  
+
   // History for Undo
   history: NavigationSnapshot[];
 
