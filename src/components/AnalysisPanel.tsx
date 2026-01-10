@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AppState, StepType, Z80Flags, Z80Registers } from '../types';
-import { Activity, Database, List, Tag, Cpu, Flag, Repeat, ArrowRight, Layers, Hash } from 'lucide-react';
+import { Activity, Database, List, Tag, Cpu, Flag, Repeat, ArrowRight, Layers, Hash, FileCode } from 'lucide-react';
 
 interface AnalysisPanelProps {
   appState: AppState;
@@ -10,7 +10,7 @@ interface AnalysisPanelProps {
 
 export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggleFlag, onRegisterChange }) => {
   const { analysis, currentStepIndex, liveRegisters, liveFlags, liveMemory } = appState;
-  const [activeTab, setActiveTab] = useState<'LOG' | 'MEM' | 'CONST' | 'STACK' | 'LBL'>('LOG');
+  const [activeTab, setActiveTab] = useState<'LOG' | 'MEM' | 'CONST' | 'STACK' | 'LBL' | 'HEX'>('LOG');
 
   if (!analysis) {
     return (
@@ -339,6 +339,13 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
         >
           <Hash size={14} /> LBL
         </button>
+        <button
+          onClick={() => setActiveTab('HEX')}
+          className={`flex-1 py-2 text-xs font-semibold flex items-center justify-center gap-1 transition-colors ${activeTab === 'HEX' ? 'text-cyan-400 border-b-2 border-cyan-500 bg-gray-900' : 'text-gray-500 hover:text-gray-300'}`}
+          title="Hex Dump RAM"
+        >
+          <FileCode size={14} /> HEX
+        </button>
       </div>
 
       {activeTab === 'LOG' ? (
@@ -369,10 +376,10 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
                     key={step.id}
                     id={`step-${idx}`}
                     className={`relative pl-4 py-2 border-l-2 transition-all ${isCurrent
-                        ? 'border-blue-500 bg-blue-900/10'
-                        : isPast
-                          ? 'border-gray-700 opacity-50'
-                          : 'border-gray-800 opacity-60'
+                      ? 'border-blue-500 bg-blue-900/10'
+                      : isPast
+                        ? 'border-gray-700 opacity-50'
+                        : 'border-gray-800 opacity-60'
                       }`}
                   >
                     {isCurrent && (
@@ -381,9 +388,9 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
 
                     <div className="flex justify-between items-start">
                       <span className={`text-xs font-mono font-bold ${step.type === 'BUG_WARNING' ? 'text-red-400' :
-                          step.type === 'LOOP' ? 'text-yellow-400' :
-                            step.type === 'CALL' ? 'text-purple-400' :
-                              'text-gray-300'
+                        step.type === 'LOOP' ? 'text-yellow-400' :
+                          step.type === 'CALL' ? 'text-purple-400' :
+                            'text-gray-300'
                         }`}>
                         {step.opcode}
                       </span>
@@ -462,8 +469,8 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
                     <div
                       key={variable.name}
                       className={`flex items-center justify-between p-2 rounded border font-mono text-xs transition-colors ${isModified
-                          ? 'bg-green-900/20 border-green-800'
-                          : 'bg-[#1a1a1a] border-gray-800'
+                        ? 'bg-green-900/20 border-green-800'
+                        : 'bg-[#1a1a1a] border-gray-800'
                         }`}
                     >
                       <div>
@@ -533,6 +540,82 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ appState, onToggle
               </div>
             </div>
           )}
+        </div>
+      ) : activeTab === 'HEX' ? (
+        <div className="flex-1 overflow-y-auto custom-scrollbar bg-[#0d0d0d]">
+          <div className="p-4">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xs font-bold text-cyan-500 uppercase tracking-wide">RAM Hex Dump</h3>
+              <span className="text-[10px] text-gray-500">Memory View</span>
+            </div>
+
+            {/* Hex Dump Display */}
+            <div className="font-mono text-[10px] leading-relaxed">
+              {/* Header */}
+              <div className="sticky top-0 bg-[#0d0d0d] pb-2 mb-2 border-b border-gray-800">
+                <div className="flex text-gray-600">
+                  <span className="w-16 mr-2">ADDR</span>
+                  <span className="flex-1">00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F</span>
+                  <span className="w-20 ml-2">ASCII</span>
+                </div>
+              </div>
+
+              {/* Memory Rows */}
+              <div className="space-y-1">
+                {(() => {
+                  // Generate hex dump for full memory range (ROM + RAM)
+                  const startAddr = 0x0000;
+                  const endAddr = 0xFFFF;
+                  const bytesPerRow = 16;
+                  const rows: React.ReactElement[] = [];
+
+                  for (let addr = startAddr; addr <= endAddr; addr += bytesPerRow) {
+                    const bytes: number[] = [];
+
+                    // Read 16 bytes for this row
+                    for (let i = 0; i < bytesPerRow; i++) {
+                      const currentAddr = addr + i;
+                      bytes.push(readByte(currentAddr));
+                    }
+
+                    // Convert bytes to hex strings
+                    const hexBytes = bytes.map(b => h8(b));
+
+                    // Convert bytes to ASCII (printable chars only)
+                    const ascii = bytes.map(b =>
+                      (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.'
+                    ).join('');
+
+                    // Check if this row has any non-zero data
+                    const hasData = bytes.some(b => b !== 0);
+
+                    rows.push(
+                      <div
+                        key={addr}
+                        className={`flex ${hasData ? 'text-gray-300' : 'text-gray-700'} hover:bg-gray-900 transition-colors`}
+                      >
+                        <span className="w-16 mr-2 text-cyan-500 font-bold">{h16val(addr)}</span>
+                        <span className="flex-1 tracking-wider">
+                          {hexBytes.map((hex, i) => (
+                            <span
+                              key={i}
+                              className={`${bytes[i] !== 0 ? 'text-green-400' : ''}`}
+                            >
+                              {hex}
+                              {i < bytesPerRow - 1 ? ' ' : ''}
+                            </span>
+                          ))}
+                        </span>
+                        <span className="w-20 ml-2 text-blue-400">{ascii}</span>
+                      </div>
+                    );
+                  }
+
+                  return rows;
+                })()}
+              </div>
+            </div>
+          </div>
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto custom-scrollbar bg-[#0d0d0d]">

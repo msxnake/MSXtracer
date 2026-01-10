@@ -1,6 +1,7 @@
 
 import { Z80Flags, Z80Registers, VDPState } from "../types";
 import { getMSXInfo } from "./msxContext";
+import { getInstructionTiming } from "./timingService";
 
 // Helper to parse numerical values
 const parseValue = (valStr: string): number | null => {
@@ -34,6 +35,25 @@ export interface SimulationState {
   flags: Z80Flags;
   memory: { [name: string]: number };
   vdp: VDPState;
+  cycles?: number; // T-states consumed by this instruction (optional for compatibility)
+  halted?: boolean; // CPU entered HALT state
+
+  // Interrupt state tracking
+  interruptState?: {
+    enabled: boolean;  // EI/DI flag
+    mode: 0 | 1 | 2;  // IM mode
+  };
+
+  // Advanced debugging: track memory access and register changes
+  memoryAccesses?: {
+    reads: number[];   // Addresses read during this instruction
+    writes: number[];  // Addresses written during this instruction
+  };
+  registerChanges?: {
+    register: string;
+    oldValue: number;
+    newValue: number;
+  }[];
 }
 
 /**
@@ -67,7 +87,8 @@ export const simulateLine = (
   lineCode: string,
   currentState: SimulationState,
   symbolTable: { [label: string]: number },
-  memoryMap?: { [address: number]: number }
+  memoryMap?: { [address: number]: number },
+  trackAccesses: boolean = false // Enable tracking for watchpoints
 ): SimulationState => {
   const nextState = {
     registers: { ...currentState.registers },
@@ -78,7 +99,13 @@ export const simulateLine = (
       addressRegister: currentState.vdp.addressRegister,
       writeLatch: currentState.vdp.writeLatch,
       registerLatch: currentState.vdp.registerLatch
-    }
+    },
+    cycles: 0, // Initialize cycles counter
+    halted: currentState.halted || false, // Preserve HALT state
+    interruptState: currentState.interruptState ? { ...currentState.interruptState } : undefined,
+    // Initialize access tracking if enabled
+    memoryAccesses: trackAccesses ? { reads: [], writes: [] } : undefined,
+    registerChanges: trackAccesses ? [] : undefined
   };
 
   const clean = lineCode.split(';')[0].trim();
@@ -150,21 +177,40 @@ export const simulateLine = (
   };
 
   const readByte = (addr: number): number => {
-    // 1. Check if dynamic memory has this address via a Label name
+    addr = addr & 0xFFFF;
+
+    // Track read access if enabled
+    if (nextState.memoryAccesses) {
+      nextState.memoryAccesses.reads.push(addr);
+    }
+
+    // 1. Check if this address is in ROM (memoryMap) - this is the assembled code data
+    if (memoryMap && memoryMap[addr] !== undefined) {
+      return memoryMap[addr];
+    }
+
+    // 2. Check if we have a label for this address
     const label = findLabelForAddress(addr);
-    if (label && nextState.memory[label] !== undefined) return nextState.memory[label];
+    if (label && nextState.memory[label] !== undefined) {
+      return nextState.memory[label];
+    }
 
-    // 2. Check if dynamic memory has this address directly or stack key
+    // 3. Check generic stack/RAM map
     const stackKey = `STACK:${addr}`;
-    if (nextState.memory[stackKey] !== undefined) return nextState.memory[stackKey];
+    if (nextState.memory[stackKey] !== undefined) {
+      return nextState.memory[stackKey];
+    }
 
-    // 3. Check Static Map (Source code DB/DW data)
-    if (memoryMap && memoryMap[addr] !== undefined) return memoryMap[addr];
-
+    // 4. Default return 0 for uninitialized memory
     return 0;
   };
 
   const writeByte = (addr: number, val: number) => {
+    // Track write access if enabled
+    if (nextState.memoryAccesses) {
+      nextState.memoryAccesses.writes.push(addr);
+    }
+
     const v = val & 0xFF;
     // 1. If we have a label for this address, update by name (so UI sees it)
     const label = findLabelForAddress(addr);
@@ -294,9 +340,25 @@ export const simulateLine = (
           const addr = getPair('DE');
           setReg(arg0, readByte(addr));
         } else if (content.startsWith('IX') || content.startsWith('IY')) {
-          // Simplified Indexing support (Treat as offset 0 for now)
-          const reg = content.substring(0, 2);
-          setReg(arg0, readByte(getPair(reg)));
+          // Index register with displacement: (IX+d) or (IY+d)
+          const reg = content.substring(0, 2); // 'IX' or 'IY'
+          let displacement = 0;
+
+          // Check for displacement
+          if (content.length > 2) {
+            const dispPart = content.substring(2); // '+d' or '-d'
+            if (dispPart.startsWith('+')) {
+              const offset = resolveValue(dispPart.substring(1));
+              if (offset !== null) displacement = offset;
+            } else if (dispPart.startsWith('-')) {
+              const offset = resolveValue(dispPart.substring(1));
+              if (offset !== null) displacement = -offset;
+            }
+          }
+
+          const baseAddr = getPair(reg);
+          const effectiveAddr = (baseAddr + displacement) & 0xFFFF;
+          setReg(arg0, readByte(effectiveAddr));
         } else {
           // Absolute Address: LD A, (nn)
           const addr = resolveValue(content);
@@ -600,6 +662,72 @@ export const simulateLine = (
       nextState.flags.pv = overflow;
     }
   }
+  else if (opcode === 'ADC') {
+    // Add with Carry
+    if (arg0 === 'A') {
+      const val = getOperandValue(arg1);
+      if (val !== null) {
+        const current = nextState.registers.a;
+        const carry = nextState.flags.c ? 1 : 0;
+        const res = current + val + carry;
+        nextState.registers.a = res & 0xFF;
+        nextState.flags.c = res > 255;
+        updateFlagsLogic(nextState.registers.a, false);
+        // Overflow calculation for ADC
+        const overflow = ((current ^ res) & (val ^ res) & 0x80) !== 0;
+        nextState.flags.pv = overflow;
+      }
+    } else if (['HL', 'IX', 'IY'].includes(arg0)) {
+      // ADC HL/IX/IY, rr
+      const current = getPair(arg0);
+      let val = 0;
+      if (['BC', 'DE', 'HL', 'SP'].includes(arg1)) val = getPair(arg1);
+      else val = resolveValue(arg1) || 0;
+
+      const carry = nextState.flags.c ? 1 : 0;
+      const res = current + val + carry;
+      setPair(arg0, res & 0xFFFF);
+      nextState.flags.c = res > 65535;
+      nextState.flags.z = (res & 0xFFFF) === 0;
+      nextState.flags.s = (res & 0x8000) !== 0;
+      // Overflow for 16-bit
+      const overflow = ((current ^ res) & (val ^ res) & 0x8000) !== 0;
+      nextState.flags.pv = overflow;
+    }
+  }
+  else if (opcode === 'SBC') {
+    // Subtract with Carry
+    if (arg0 === 'A') {
+      const val = getOperandValue(arg1);
+      if (val !== null) {
+        const current = nextState.registers.a;
+        const carry = nextState.flags.c ? 1 : 0;
+        const res = current - val - carry;
+        nextState.registers.a = res & 0xFF;
+        nextState.flags.c = (current < val + carry);
+        updateFlagsLogic(nextState.registers.a, false);
+        // Overflow calculation for SBC
+        const overflow = ((current ^ val) & (current ^ res) & 0x80) !== 0;
+        nextState.flags.pv = overflow;
+      }
+    } else if (['HL', 'IX', 'IY'].includes(arg0)) {
+      // SBC HL/IX/IY, rr
+      const current = getPair(arg0);
+      let val = 0;
+      if (['BC', 'DE', 'HL', 'SP'].includes(arg1)) val = getPair(arg1);
+      else val = resolveValue(arg1) || 0;
+
+      const carry = nextState.flags.c ? 1 : 0;
+      const res = current - val - carry;
+      setPair(arg0, res & 0xFFFF);
+      nextState.flags.c = (current < val + carry);
+      nextState.flags.z = (res & 0xFFFF) === 0;
+      nextState.flags.s = (res & 0x8000) !== 0;
+      // Overflow for 16-bit
+      const overflow = ((current ^ val) & (current ^ res) & 0x8000) !== 0;
+      nextState.flags.pv = overflow;
+    }
+  }
 
   // 8. BIT INSTRUCTIONS (Critical for JP Z / JP NZ)
   else if (opcode === 'BIT') {
@@ -666,6 +794,104 @@ export const simulateLine = (
     // Flags N and H are reset
   }
 
+  // 9b. EXTENDED ROTATES AND SHIFTS (for all registers)
+  else if (['RLC', 'RRC', 'RL', 'RR', 'SLA', 'SRA', 'SRL'].includes(opcode)) {
+    // These work on any 8-bit register or (HL)
+    let val = 0;
+    const isMemory = arg0 === '(HL)';
+
+    if (isMemory) {
+      const addr = getPair('HL');
+      val = readByte(addr);
+    } else if (['A', 'B', 'C', 'D', 'E', 'H', 'L'].includes(arg0)) {
+      val = getReg(arg0);
+    } else {
+      return nextState; // Invalid operand
+    }
+
+    let c = nextState.flags.c ? 1 : 0;
+    let newCarry = 0;
+
+    if (opcode === 'RLC') {
+      // Rotate Left Circular
+      newCarry = (val >> 7) & 1;
+      val = ((val << 1) | newCarry) & 0xFF;
+    } else if (opcode === 'RRC') {
+      // Rotate Right Circular
+      newCarry = val & 1;
+      val = ((val >> 1) | (newCarry << 7)) & 0xFF;
+    } else if (opcode === 'RL') {
+      // Rotate Left through Carry
+      newCarry = (val >> 7) & 1;
+      val = ((val << 1) | c) & 0xFF;
+    } else if (opcode === 'RR') {
+      // Rotate Right through Carry
+      newCarry = val & 1;
+      val = ((val >> 1) | (c << 7)) & 0xFF;
+    } else if (opcode === 'SLA') {
+      // Shift Left Arithmetic (shift in 0)
+      newCarry = (val >> 7) & 1;
+      val = (val << 1) & 0xFF;
+    } else if (opcode === 'SRA') {
+      // Shift Right Arithmetic (preserve sign bit)
+      newCarry = val & 1;
+      const sign = val & 0x80;
+      val = ((val >> 1) | sign) & 0xFF;
+    } else if (opcode === 'SRL') {
+      // Shift Right Logical (shift in 0)
+      newCarry = val & 1;
+      val = (val >> 1) & 0xFF;
+    }
+
+    // Update flags
+    nextState.flags.c = newCarry === 1;
+    updateFlagsLogic(val, true); // S, Z, PV (parity)
+
+    // Write back result
+    if (isMemory) {
+      const addr = getPair('HL');
+      writeByte(addr, val);
+    } else {
+      setReg(arg0, val);
+    }
+  }
+
+  // RLD and RRD (BCD nibble rotates)
+  else if (opcode === 'RLD' || opcode === 'RRD') {
+    // RLD: Rotate Left Digit (nibbles of A and (HL))
+    // RRD: Rotate Right Digit
+    const addr = getPair('HL');
+    const memVal = readByte(addr);
+    let a = nextState.registers.a;
+
+    if (opcode === 'RLD') {
+      // A[3:0] <- (HL)[7:4] <- (HL)[3:0] <- A[3:0]
+      const aLow = a & 0x0F;
+      const memHigh = (memVal >> 4) & 0x0F;
+      const memLow = memVal & 0x0F;
+
+      a = (a & 0xF0) | memHigh;
+      const newMem = ((memLow << 4) | aLow) & 0xFF;
+
+      writeByte(addr, newMem);
+      nextState.registers.a = a;
+    } else { // RRD
+      // A[3:0] <- (HL)[3:0] <- (HL)[7:4] <- A[3:0]
+      const aLow = a & 0x0F;
+      const memHigh = (memVal >> 4) & 0x0F;
+      const memLow = memVal & 0x0F;
+
+      a = (a & 0xF0) | memLow;
+      const newMem = ((aLow << 4) | memHigh) & 0xFF;
+
+      writeByte(addr, newMem);
+      nextState.registers.a = a;
+    }
+
+    // Update flags (S, Z, P affected; C unchanged)
+    updateFlagsLogic(nextState.registers.a, true);
+  }
+
   // 10. FLAGS
   else if (opcode === 'SCF') {
     nextState.flags.c = true;
@@ -674,10 +900,470 @@ export const simulateLine = (
     nextState.flags.c = !nextState.flags.c;
   }
 
-  // 11. DJNZ
+  // 11. CONTROL FLOW INSTRUCTIONS
+
+  // NOP - No Operation
+  else if (opcode === 'NOP') {
+    // Does nothing, just advance to next instruction
+  }
+
+  // HALT - Stop execution until interrupt
+  else if (opcode === 'HALT') {
+    // HALT stops CPU execution but continues consuming cycles
+    // Handled in App.tsx: 4 T-states per cycle until interrupt
+    nextState.halted = true;
+  }
+
+  // INTERRUPT CONTROL
+  else if (opcode === 'DI') {
+    // Disable Interrupts
+    if (!nextState.interruptState) {
+      nextState.interruptState = { enabled: false, mode: 1 };
+    } else {
+      nextState.interruptState.enabled = false;
+    }
+  }
+
+  else if (opcode === 'EI') {
+    // Enable Interrupts
+    if (!nextState.interruptState) {
+      nextState.interruptState = { enabled: true, mode: 1 };
+    } else {
+      nextState.interruptState.enabled = true;
+    }
+  }
+
+  else if (opcode === 'IM') {
+    // Set Interrupt Mode (0, 1, or 2)
+    // IM 0, IM 1, IM 2
+    const mode = parseInt(arg0) as (0 | 1 | 2);
+    if (!isNaN(mode) && (mode === 0 || mode === 1 || mode === 2)) {
+      if (!nextState.interruptState) {
+        nextState.interruptState = { enabled: false, mode };
+      } else {
+        nextState.interruptState.mode = mode;
+      }
+    }
+  }
+
+  // EXTENDED I/O OPERATIONS
+  else if (opcode === 'IN') {
+    // IN A, (n) or IN r, (C)
+    if (arg0 === 'A' && arg1.startsWith('(') && arg1.endsWith(')')) {
+      // IN A, (n)
+      const portStr = arg1.slice(1, -1).trim();
+      const port = resolveValue(portStr);
+
+      if (port !== null) {
+        // For MSX simulation, we could read VDP status, keyboard, etc.
+        // For now, return 0xFF (all bits high - common for unconnected ports)
+        if (port === 0x99 || portStr === '$99' || portStr === '99H') {
+          // VDP status register - simplified
+          nextState.registers.a = 0x00; // No interrupts, no collision
+        } else {
+          nextState.registers.a = 0xFF; // Default for unknown ports
+        }
+      }
+    } else if (arg1 === '(C)') {
+      // IN r, (C) - port number in C register
+      const port = nextState.registers.c;
+      let val = 0xFF; // Default - could be extended for specific ports
+
+      if (['A', 'B', 'C', 'D', 'E', 'H', 'L'].includes(arg0)) {
+        setReg(arg0, val);
+      }
+
+      // Update flags for IN r,(C)
+      nextState.flags.z = val === 0;
+      nextState.flags.s = (val & 0x80) !== 0;
+      nextState.flags.pv = calculateParity(val);
+    }
+  }
+
+  // Block I/O operations
+  else if (opcode === 'INIR') {
+    // Input, Increment, Repeat
+    let addr = getPair('HL');
+    let b = nextState.registers.b;
+    const port = nextState.registers.c;
+
+    while (b > 0) {
+      const val = 0xFF; // Simulated input
+      writeByte(addr, val);
+      addr = (addr + 1) & 0xFFFF;
+      b = (b - 1) & 0xFF;
+    }
+
+    setPair('HL', addr);
+    nextState.registers.b = 0;
+    nextState.flags.z = true;
+  }
+
+  else if (opcode === 'OTIR') {
+    // Output, Increment, Repeat
+    let addr = getPair('HL');
+    let b = nextState.registers.b;
+    const port = nextState.registers.c;
+
+    while (b > 0) {
+      const val = readByte(addr);
+      // Output val to port (C)
+      // In simulation, we could handle VDP writes, PSG, etc.
+      addr = (addr + 1) & 0xFFFF;
+      b = (b - 1) & 0xFF;
+    }
+
+    setPair('HL', addr);
+    nextState.registers.b = 0;
+    nextState.flags.z = true;
+  }
+
+  else if (opcode === 'INI') {
+    // Input and Increment
+    const addr = getPair('HL');
+    const val = 0xFF; // Simulated input from port (C)
+    writeByte(addr, val);
+
+    setPair('HL', (addr + 1) & 0xFFFF);
+    nextState.registers.b = (nextState.registers.b - 1) & 0xFF;
+    nextState.flags.z = nextState.registers.b === 0;
+  }
+
+  else if (opcode === 'OUTI') {
+    // Output and Increment
+    const addr = getPair('HL');
+    const val = readByte(addr);
+    // Output to port (C)
+
+    setPair('HL', (addr + 1) & 0xFFFF);
+    nextState.registers.b = (nextState.registers.b - 1) & 0xFF;
+    nextState.flags.z = nextState.registers.b === 0;
+  }
+
+  else if (opcode === 'IND') {
+    // Input and Decrement
+    const addr = getPair('HL');
+    const val = 0xFF; // Simulated input from port (C)
+    writeByte(addr, val);
+
+    setPair('HL', (addr - 1) & 0xFFFF);
+    nextState.registers.b = (nextState.registers.b - 1) & 0xFF;
+    nextState.flags.z = nextState.registers.b === 0;
+  }
+
+  else if (opcode === 'OUTD') {
+    // Output and Decrement
+    const addr = getPair('HL');
+    const val = readByte(addr);
+    // Output to port (C)
+
+    setPair('HL', (addr - 1) & 0xFFFF);
+    nextState.registers.b = (nextState.registers.b - 1) & 0xFF;
+    nextState.flags.z = nextState.registers.b === 0;
+  }
+
+  else if (opcode === 'INDR') {
+    // Input, Decrement, Repeat
+    let addr = getPair('HL');
+    let b = nextState.registers.b;
+
+    while (b > 0) {
+      const val = 0xFF; // Simulated input
+      writeByte(addr, val);
+      addr = (addr - 1) & 0xFFFF;
+      b = (b - 1) & 0xFF;
+    }
+
+    setPair('HL', addr);
+    nextState.registers.b = 0;
+    nextState.flags.z = true;
+  }
+
+  else if (opcode === 'OTDR') {
+    // Output, Decrement, Repeat
+    let addr = getPair('HL');
+    let b = nextState.registers.b;
+
+    while (b > 0) {
+      const val = readByte(addr);
+      // Output to port (C)
+      addr = (addr - 1) & 0xFFFF;
+      b = (b - 1) & 0xFF;
+    }
+
+    setPair('HL', addr);
+    nextState.registers.b = 0;
+    nextState.flags.z = true;
+  }
+
+  // JP - Jump Absolute
+  else if (opcode === 'JP') {
+    // JP can be: JP nn, JP cc,nn, or JP (HL/IX/IY)
+    if (arg0.startsWith('(') && arg0.endsWith(')')) {
+      // Indirect jump: JP (HL), JP (IX), JP (IY)
+      const reg = arg0.slice(1, -1).trim();
+      if (['HL', 'IX', 'IY'].includes(reg)) {
+        const addr = getPair(reg);
+        // Store jump target in a special property so executeSubroutine can handle it
+        (nextState as any).__jumpTarget = addr;
+      }
+    } else if (arg1) {
+      // Conditional jump: JP cc, nn
+      const condition = arg0;
+      const target = resolveValue(arg1);
+      if (target !== null && checkCondition(condition, nextState.flags)) {
+        (nextState as any).__jumpTarget = target;
+      }
+    } else {
+      // Unconditional jump: JP nn
+      const target = resolveValue(arg0);
+      if (target !== null) {
+        (nextState as any).__jumpTarget = target;
+      }
+    }
+  }
+
+  // JR - Jump Relative
+  else if (opcode === 'JR') {
+    // JR can be: JR e, or JR cc, e
+    if (arg1) {
+      // Conditional relative jump: JR cc, e
+      const condition = arg0;
+      const offset = resolveValue(arg1);
+      if (offset !== null && checkCondition(condition, nextState.flags)) {
+        // Relative offset is signed 8-bit
+        const signedOffset = offset > 127 ? offset - 256 : offset;
+        (nextState as any).__relativeJump = signedOffset;
+      }
+    } else {
+      // Unconditional relative jump: JR e
+      const offset = resolveValue(arg0);
+      if (offset !== null) {
+        // Relative offset is signed 8-bit
+        const signedOffset = offset > 127 ? offset - 256 : offset;
+        (nextState as any).__relativeJump = signedOffset;
+      }
+    }
+  }
+
+  // DJNZ - Decrement B and Jump if Not Zero
   else if (opcode === 'DJNZ') {
     const b = (nextState.registers.b - 1) & 0xFF;
     nextState.registers.b = b;
+
+    // If B is not zero after decrement, perform relative jump
+    if (b !== 0) {
+      const offset = resolveValue(arg0);
+      if (offset !== null) {
+        // Relative offset is signed 8-bit
+        const signedOffset = offset > 127 ? offset - 256 : offset;
+        (nextState as any).__relativeJump = signedOffset;
+      }
+    }
+  }
+
+  // 11b. BLOCK OPERATIONS (Critical for MSX)
+
+  // LDI - Load and Increment
+  else if (opcode === 'LDI') {
+    const src = getPair('HL');
+    const dst = getPair('DE');
+    const val = readByte(src);
+    writeByte(dst, val);
+
+    setPair('HL', (src + 1) & 0xFFFF);
+    setPair('DE', (dst + 1) & 0xFFFF);
+    const bc = (getPair('BC') - 1) & 0xFFFF;
+    setPair('BC', bc);
+
+    nextState.flags.pv = bc !== 0; // PV set if BC != 0
+  }
+
+  // LDIR - Load, Increment, Repeat
+  else if (opcode === 'LDIR') {
+    let src = getPair('HL');
+    let dst = getPair('DE');
+    let bc = getPair('BC');
+
+    // Copy BC bytes from (HL) to (DE)
+    for (let i = 0; i < bc; i++) {
+      const val = readByte(src + i);
+      writeByte(dst + i, val);
+    }
+
+    setPair('HL', (src + bc) & 0xFFFF);
+    setPair('DE', (dst + bc) & 0xFFFF);
+    setPair('BC', 0);
+    nextState.flags.pv = false; // BC is always 0 after LDIR
+  }
+
+  // LDD - Load and Decrement
+  else if (opcode === 'LDD') {
+    const src = getPair('HL');
+    const dst = getPair('DE');
+    const val = readByte(src);
+    writeByte(dst, val);
+
+    setPair('HL', (src - 1) & 0xFFFF);
+    setPair('DE', (dst - 1) & 0xFFFF);
+    const bc = (getPair('BC') - 1) & 0xFFFF;
+    setPair('BC', bc);
+
+    nextState.flags.pv = bc !== 0;
+  }
+
+  // LDDR - Load, Decrement, Repeat
+  else if (opcode === 'LDDR') {
+    let src = getPair('HL');
+    let dst = getPair('DE');
+    let bc = getPair('BC');
+
+    // Copy BC bytes from (HL) to (DE), decrementing
+    for (let i = 0; i < bc; i++) {
+      const val = readByte(src - i);
+      writeByte(dst - i, val);
+    }
+
+    setPair('HL', (src - bc) & 0xFFFF);
+    setPair('DE', (dst - bc) & 0xFFFF);
+    setPair('BC', 0);
+    nextState.flags.pv = false;
+  }
+
+  // CPI - Compare and Increment
+  else if (opcode === 'CPI') {
+    const addr = getPair('HL');
+    const val = readByte(addr);
+    const a = nextState.registers.a;
+    const result = a - val;
+
+    nextState.flags.z = (result & 0xFF) === 0;
+    nextState.flags.s = (result & 0x80) !== 0;
+
+    setPair('HL', (addr + 1) & 0xFFFF);
+    const bc = (getPair('BC') - 1) & 0xFFFF;
+    setPair('BC', bc);
+    nextState.flags.pv = bc !== 0;
+  }
+
+  // CPIR - Compare, Increment, Repeat
+  else if (opcode === 'CPIR') {
+    let addr = getPair('HL');
+    let bc = getPair('BC');
+    const a = nextState.registers.a;
+    let found = false;
+
+    while (bc > 0) {
+      const val = readByte(addr);
+      const result = a - val;
+
+      if ((result & 0xFF) === 0) {
+        found = true;
+        nextState.flags.z = true;
+        break;
+      }
+
+      addr = (addr + 1) & 0xFFFF;
+      bc = (bc - 1) & 0xFFFF;
+    }
+
+    if (!found) {
+      nextState.flags.z = false;
+    }
+
+    setPair('HL', addr);
+    setPair('BC', bc);
+    nextState.flags.pv = bc !== 0;
+  }
+
+  // CPD - Compare and Decrement
+  else if (opcode === 'CPD') {
+    const addr = getPair('HL');
+    const val = readByte(addr);
+    const a = nextState.registers.a;
+    const result = a - val;
+
+    nextState.flags.z = (result & 0xFF) === 0;
+    nextState.flags.s = (result & 0x80) !== 0;
+
+    setPair('HL', (addr - 1) & 0xFFFF);
+    const bc = (getPair('BC') - 1) & 0xFFFF;
+    setPair('BC', bc);
+    nextState.flags.pv = bc !== 0;
+  }
+
+  // CPDR - Compare, Decrement, Repeat
+  else if (opcode === 'CPDR') {
+    let addr = getPair('HL');
+    let bc = getPair('BC');
+    const a = nextState.registers.a;
+    let found = false;
+
+    while (bc > 0) {
+      const val = readByte(addr);
+      const result = a - val;
+
+      if ((result & 0xFF) === 0) {
+        found = true;
+        nextState.flags.z = true;
+        break;
+      }
+
+      addr = (addr - 1) & 0xFFFF;
+      bc = (bc - 1) & 0xFFFF;
+    }
+
+    if (!found) {
+      nextState.flags.z = false;
+    }
+
+    setPair('HL', addr);
+    setPair('BC', bc);
+    nextState.flags.pv = bc !== 0;
+  }
+
+  // 11c. OTHER ESSENTIAL INSTRUCTIONS
+
+  // NEG - Negate accumulator (2's complement)
+  else if (opcode === 'NEG') {
+    const a = nextState.registers.a;
+    const result = (0 - a) & 0xFF;
+    nextState.registers.a = result;
+
+    nextState.flags.c = a !== 0;
+    nextState.flags.z = result === 0;
+    nextState.flags.s = (result & 0x80) !== 0;
+    nextState.flags.pv = a === 0x80; // Overflow only when negating -128
+  }
+
+  // CPL - Complement accumulator (1's complement)
+  else if (opcode === 'CPL') {
+    nextState.registers.a = (~nextState.registers.a) & 0xFF;
+    // Flags: S, Z, P/V, C unchanged
+  }
+
+  // DAA - Decimal Adjust Accumulator (for BCD)
+  else if (opcode === 'DAA') {
+    let a = nextState.registers.a;
+    let correction = 0;
+
+    // Lower nibble correction
+    if ((a & 0x0F) > 9) {
+      correction += 0x06;
+    }
+
+    // Upper nibble correction
+    if ((a & 0xF0) > 0x90 || nextState.flags.c) {
+      correction += 0x60;
+      nextState.flags.c = true;
+    }
+
+    a = (a + correction) & 0xFF;
+    nextState.registers.a = a;
+
+    nextState.flags.z = a === 0;
+    nextState.flags.s = (a & 0x80) !== 0;
+    nextState.flags.pv = calculateParity(a);
   }
 
   // 12. BIOS CALLS & RST & RET (Stack Ops)
@@ -709,10 +1395,30 @@ export const simulateLine = (
       let src = getPair('HL');
       let dst = getPair('DE') & 0x3FFF;
       let len = getPair('BC');
+
+      console.log(`[LDIRVM] Copying ${len} bytes from RAM $${src.toString(16)} to VRAM $${dst.toString(16)}`);
+
+      // Show ALL bytes in the source range from memoryMap
+      if (memoryMap) {
+        const allBytes = [];
+        for (let i = 0; i < len; i++) {
+          const val = memoryMap[src + i];
+          allBytes.push(val !== undefined ? val.toString(16).padStart(2, '0') : 'XX');
+        }
+        console.log(`[LDIRVM] memoryMap full range:`, allBytes.join(' '));
+      }
+
       for (let i = 0; i < len; i++) {
         let val = readByte(src + i);
         nextState.vdp.vram[(dst + i) & 0x3FFF] = val;
       }
+
+      // Verify what was written to VRAM
+      const vramCheck = [];
+      for (let i = 0; i < len; i++) {
+        vramCheck.push(nextState.vdp.vram[(dst + i) & 0x3FFF].toString(16).padStart(2, '0'));
+      }
+      console.log(`[LDIRVM] VRAM[$${dst.toString(16)}] now contains:`, vramCheck.join(' '));
     }
     else if (target === 0x0056) { // FILVRM
       let addr = getPair('HL') & 0x3FFF;
@@ -766,6 +1472,25 @@ export const simulateLine = (
       }
     }
   }
+
+  // === END OF INSTRUCTION SIMULATION ===
+
+  // Calculate T-states for this instruction
+  let conditionMet: boolean | undefined = undefined;
+
+  // Detect conditional instructions and their execution path
+  if (opcode === 'JR' && args.length > 1) {
+    conditionMet = checkCondition(arg0, nextState.flags);
+  } else if (opcode === 'DJNZ') {
+    conditionMet = nextState.registers.b !== 0;
+  } else if (opcode === 'CALL' && args.length > 1) {
+    conditionMet = checkCondition(arg0, nextState.flags);
+  } else if (opcode === 'RET' && args.length > 0 && arg0 !== '') {
+    conditionMet = checkCondition(arg0, nextState.flags);
+  }
+
+  // Calculate cycles using timing service
+  nextState.cycles = getInstructionTiming(opcode, operands, conditionMet);
 
   return nextState;
 };
@@ -899,7 +1624,40 @@ export const executeSubroutine = (
     }
 
     // Jumps (JP/JR)
-    else if (/^(JP|JR)\b/i.test(clean)) {
+    else if (/^(JP|JR)\\b/i.test(clean)) {
+      // Check if simulateLine set jump properties
+      const jumpTarget = (state as any).__jumpTarget;
+      const relativeJump = (state as any).__relativeJump;
+
+      if (jumpTarget !== undefined) {
+        // Absolute jump (JP)
+        // Try to find the label for this address
+        const labelEntry = Object.entries(symbolTable).find(([_, val]) => val === jumpTarget);
+        if (labelEntry && labels[labelEntry[0]]) {
+          pc = labels[labelEntry[0]];
+          // Clear the jump marker
+          delete (state as any).__jumpTarget;
+          steps++;
+          continue;
+        }
+        // If not found in labels, might be jumping to dynamic address
+        // For now, just advance (could improve this)
+        delete (state as any).__jumpTarget;
+      } else if (relativeJump !== undefined) {
+        // Relative jump (JR or DJNZ)
+        // Relative jumps are from the NEXT instruction (PC+2 for JR, PC+2 for DJNZ)
+        // In our line-based system, we need to find the target line
+        // For now, approximate by adding the offset to current PC
+        // Note: This is a simplified implementation
+        pc = pc + 1 + relativeJump; // +1 to skip current instruction, then apply offset
+
+        // Clear the jump marker
+        delete (state as any).__relativeJump;
+        steps++;
+        continue;
+      }
+
+      // Fallback to old logic if properties not set
       const isJr = clean.toUpperCase().startsWith('JR');
       const content = clean.substring(isJr ? 2 : 2).trim();
       const args = content.split(',');
@@ -966,8 +1724,20 @@ export const executeSubroutine = (
       }
     }
 
-    // DJNZ
-    else if (/^DJNZ\b/i.test(clean)) {
+    // DJNZ - Decrement and Jump if Not Zero
+    else if (/^DJNZ\\b/i.test(clean)) {
+      // Check if simulateLine set the relativeJump property
+      const relativeJump = (state as any).__relativeJump;
+
+      if (relativeJump !== undefined) {
+        // Use the relative jump calculated by simulateLine
+        pc = pc + 1 + relativeJump; // +1 to skip current instruction, then apply offset
+        delete (state as any).__relativeJump;
+        steps++;
+        continue;
+      }
+
+      // Fallback to old logic (B is already decremented by simulateLine)
       if (state.registers.b !== 0) {
         const target = clean.substring(4).trim();
         if (labels[target.toUpperCase()]) {

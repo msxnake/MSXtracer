@@ -141,6 +141,123 @@ export interface BiosExecutionContext {
   callDepth: number;           // Track nested BIOS calls
 }
 
+// ===== ADVANCED DEBUGGING TYPES =====
+
+// Comparison operators for conditional expressions
+export type ComparisonOperator = '==' | '!=' | '>' | '<' | '>=' | '<=';
+
+// Condition expression for breakpoints
+export interface BreakpointCondition {
+  leftOperand: string;    // Register name ('A', 'HL', 'BC', etc.) or memory address
+  operator: ComparisonOperator;
+  rightOperand: string;   // Value (hex/dec) or another register name
+}
+
+// Conditional breakpoint - stops when condition is true at a specific line
+export interface ConditionalBreakpoint {
+  id: string;
+  lineNumber: number;
+  condition: BreakpointCondition;
+  enabled: boolean;
+  hitCount: number;
+  description?: string;   // User-friendly description
+}
+
+// Memory watchpoint - monitors memory address or label for changes
+export interface MemoryWatchpoint {
+  id: string;
+  addressOrLabel: string;  // Memory address (hex like '0xC000') or label name
+  type: 'read' | 'write' | 'both';
+  enabled: boolean;
+  hitCount: number;
+  lastValue?: number;      // Track previous value for change detection
+  description?: string;
+}
+
+// Register watchpoint - triggers when register meets condition
+export interface RegisterWatchpoint {
+  id: string;
+  register: keyof Z80Registers;
+  condition: BreakpointCondition;
+  enabled: boolean;
+  hitCount: number;
+  description?: string;
+}
+
+// Access breakpoint - stops on specific memory access type
+export interface AccessBreakpoint {
+  id: string;
+  addressOrLabel: string;
+  accessType: 'read' | 'write';
+  enabled: boolean;
+  hitCount: number;
+  description?: string;
+}
+
+// Memory access tracking for simulator
+export interface MemoryAccess {
+  reads: number[];   // Addresses read during instruction
+  writes: number[];  // Addresses written during instruction
+}
+
+// Register change tracking for simulator
+export interface RegisterChange {
+  register: keyof Z80Registers;
+  oldValue: number;
+  newValue: number;
+}
+
+// Breakpoint trigger information
+export interface BreakpointTrigger {
+  type: 'conditional' | 'memory' | 'register' | 'access';
+  id: string;
+  description: string;
+  address?: number;
+}
+
+// ===== WATCHLIST TYPES =====
+
+// Type of value to watch
+export type WatchType = 'register' | 'memory' | 'flag';
+
+// Watchlist item for monitoring specific values
+export interface WatchlistItem {
+  id: string;
+  type: WatchType;
+  name: string;              // Display name (e.g., "A Register", "Player X Position")
+  expression: string;        // What to watch: "a", "hl", "0xC000", "PLAYER_X"
+  previousValue?: number;    // Previous value for change detection
+  currentValue?: number;     // Current resolved value
+  enabled: boolean;
+}
+
+// ===== TIMING & PERFORMANCE TYPES =====
+
+// MSX timing configuration
+export interface MSXTimingConfig {
+  cpuFrequency: number;      // CPU frequency in Hz (3579545 for NTSC, 3546894 for PAL)
+  vblankFrequency: number;   // VBLANK frequency in Hz (60 for NTSC, 50 for PAL)
+  cyclesPerFrame: number;    // Calculated T-states per frame
+  name: 'NTSC' | 'PAL';      // Timing mode name
+}
+
+// Timing state for simulation
+export interface TimingState {
+  totalCycles: number;           // Total accumulated T-states
+  cyclesSinceVBlank: number;     // Cycles since last VBLANK
+  frameCount: number;            // Number of VBLANKs occurred
+  lastInstructionCycles: number; // T-states of last executed instruction
+  interruptPending: boolean;     // Is interrupt pending?
+}
+
+// Interrupt state
+export interface InterruptState {
+  maskable: boolean;        // IM mode enabled
+  mode: 0 | 1 | 2;         // Interrupt mode
+  enabled: boolean;         // EI/DI state
+  vector: number;          // Interrupt vector (for IM 2)
+}
+
 export interface NavigationSnapshot {
   currentStepIndex: number;
   manualLine: number | null;
@@ -164,8 +281,21 @@ export interface AppState {
   // Interactive State
   isEditing: boolean; // Toggle editor
   isPlaying: boolean; // Auto-run mode
-  breakpoints: Set<number>; // Line numbers
+  executionSpeed: number; // Instructions per interval in Play mode (1, 10, 100, 1000)
+  breakpoints: Set<number>; // Line numbers (simple breakpoints)
   showVDP: boolean; // Show VDP Dialog
+
+  // Advanced Debugging State
+  conditionalBreakpoints: ConditionalBreakpoint[];
+  memoryWatchpoints: MemoryWatchpoint[];
+  registerWatchpoints: RegisterWatchpoint[];
+  accessBreakpoints: AccessBreakpoint[];
+  showBreakpointManager: boolean; // Show advanced breakpoint manager
+  lastBreakpointTrigger: BreakpointTrigger | null; // Info about last triggered breakpoint
+
+  // Watchlist State
+  watchlist: WatchlistItem[];
+  showWatchlist: boolean;
 
   // Recursive Navigation State
   manualLine: number | null; // If not null, we are stepping manually at this line number (off-road)
@@ -179,6 +309,16 @@ export interface AppState {
   liveFlags: Z80Flags; // CPU Flags
   liveMemory: { [name: string]: number }; // Map of VariableName -> Value
   liveVDP: VDPState; // Added VDP State
+
+  // Timing & Performance State
+  timingState: TimingState;
+  timingConfig: MSXTimingConfig;
+  interruptState: InterruptState;
+  showTiming: boolean; // Toggle for timing panel
+
+  // CPU Execution State
+  isHalted: boolean;              // CPU in HALT state
+  haltCyclesAccumulated: number;  // T-states consumed during HALT
 
   // C-BIOS State
   showCBios: boolean; // Show C-BIOS loader dialog

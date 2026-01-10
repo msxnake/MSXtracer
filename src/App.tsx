@@ -6,7 +6,10 @@ import { CodeViewer } from './components/CodeViewer';
 import { AnalysisPanel } from './components/AnalysisPanel';
 import { VdpViewer } from './components/VdpViewer';
 import { CBiosLoader } from './components/CBiosLoader';
-import { AppState, NavigationSnapshot, StepType, Z80Flags, Z80Registers, BiosExecutionContext } from './types';
+import { BreakpointManager } from './components/BreakpointManager';
+import { WatchlistPanel } from './components/WatchlistPanel';
+import { TimingPanel } from './components/TimingPanel';
+import { AppState, NavigationSnapshot, StepType, Z80Flags, Z80Registers, BiosExecutionContext, WatchlistItem } from './types';
 import { analyzeZ80Code } from './services/geminiService';
 import { simulateLine, executeSubroutine, checkCondition, executeLoopUntilCompletion, simulateBiosInstruction } from './services/z80Simulator';
 import { loadRomFromBuffer, setCBiosVersion, getCBiosState, loadCBiosFromPublic, isCBiosLoaded, createBiosRomReader, getBiosRoutineInfo } from './services/cbiosService';
@@ -19,6 +22,9 @@ import {
   getVisibleBiosSteps
 } from './services/biosExecutionService';
 import { disassembleInstruction, isReturnInstruction, isJumpInstruction, isCallInstruction, getTargetAddress } from './services/z80Disassembler';
+import { exportToROM, downloadROM, getROMInfo } from './services/romExporter';
+import { checkAllBreakpoints, incrementBreakpointHitCount } from './services/breakpointChecker';
+import { MSX_TIMING_NTSC, checkVBlankInterrupt } from './services/timingService';
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>({
@@ -48,10 +54,45 @@ const App: React.FC = () => {
     liveMemory: {},
     liveVDP: { vram: new Array(16384).fill(0), addressRegister: 0, writeLatch: false, registerLatch: 0 },
     isPlaying: false,
+    executionSpeed: 1,
     isEditing: false,
     showVDP: false,
     showCBios: false,
     breakpoints: new Set<number>(),
+
+    // Advanced Debugging
+    conditionalBreakpoints: [],
+    memoryWatchpoints: [],
+    registerWatchpoints: [],
+    accessBreakpoints: [],
+    showBreakpointManager: false,
+    lastBreakpointTrigger: null,
+
+    // Watchlist
+    watchlist: [],
+    showWatchlist: false,
+
+    // Timing & Performance
+    timingState: {
+      totalCycles: 0,
+      cyclesSinceVBlank: 0,
+      frameCount: 0,
+      lastInstructionCycles: 0,
+      interruptPending: false
+    },
+    timingConfig: MSX_TIMING_NTSC,
+    interruptState: {
+      maskable: true,
+      mode: 1,
+      enabled: true,  // Changed to true - MSX BIOS enables interrupts by default
+      vector: 0
+    },
+    showTiming: false,
+
+    // CPU Execution State
+    isHalted: false,
+    haltCyclesAccumulated: 0,
+
     cbiosState: {
       loaded: false,
       version: 'msx2',
@@ -354,6 +395,50 @@ const App: React.FC = () => {
         return { ...prev, isPlaying: false };
       }
 
+      // === HALT STATE HANDLING ===
+      if (prev.isHalted) {
+        // CPU is halted - check if interrupts are enabled
+        if (prev.interruptState.enabled) {
+          // Fast-forward to next VBLANK interrupt
+          const cyclesUntilVBlank = prev.timingConfig.cyclesPerFrame - prev.timingState.cyclesSinceVBlank;
+          const newTotalCycles = prev.timingState.totalCycles + cyclesUntilVBlank;
+          const newHaltCycles = prev.haltCyclesAccumulated + cyclesUntilVBlank;
+
+          // Wake CPU immediately (skip to VBLANK)
+          return {
+            ...prev,
+            isHalted: false,
+            currentStepIndex: prev.currentStepIndex + 1,
+            timingState: {
+              totalCycles: newTotalCycles,
+              cyclesSinceVBlank: 0, // Reset to 0 after VBLANK
+              frameCount: prev.timingState.frameCount + 1,
+              lastInstructionCycles: cyclesUntilVBlank,
+              interruptPending: true
+            },
+            haltCyclesAccumulated: 0 // Reset after wake
+          };
+        } else {
+          // Interrupts disabled - stay halted, accumulate 4 cycles per step
+          const haltCycles = 4;
+          const newTotalCycles = prev.timingState.totalCycles + haltCycles;
+          const newCyclesSinceVBlank = prev.timingState.cyclesSinceVBlank + haltCycles;
+          const newHaltCycles = prev.haltCyclesAccumulated + haltCycles;
+
+          return {
+            ...prev,
+            haltCyclesAccumulated: newHaltCycles,
+            timingState: {
+              ...prev.timingState,
+              totalCycles: newTotalCycles,
+              cyclesSinceVBlank: newCyclesSinceVBlank,
+              lastInstructionCycles: haltCycles
+            }
+          };
+        }
+      }
+
+      // === NORMAL INSTRUCTION EXECUTION ===
       const step = prev.analysis.steps[prev.currentStepIndex];
       const lines = prev.code.split('\n');
       const lineContent = lines[step.lineNumber - 1];
@@ -434,12 +519,23 @@ const App: React.FC = () => {
           else if (!prev.analysis.labels[label.toUpperCase()]) {
             const targetAddr = resolveTargetAddress(label, prev.analysis);
             if (targetAddr !== null && targetAddr >= 0 && targetAddr < 0x4000) {
-              // BIOS call as black box: CALL pushes, BIOS RETs - net SP change is 0
-              // Just move to next instruction
+              // BIOS call: Still run simulateLine to trigger BIOS hooks (LDIRVM, WRTVRM, etc.)
+              // Then treat as black box: CALL pushes, BIOS RETs - net SP change is 0
+              const biosState = simulateLine(
+                lineContent,
+                { registers: prev.liveRegisters, flags: prev.liveFlags, memory: prev.liveMemory, vdp: prev.liveVDP },
+                prev.analysis.symbolTable,
+                prev.analysis.memoryMap || {}
+              );
+
               return {
                 ...prev,
                 currentStepIndex: prev.currentStepIndex + 1,
-                history: historySnapshot
+                history: historySnapshot,
+                liveRegisters: biosState.registers,
+                liveFlags: biosState.flags,
+                liveMemory: biosState.memory,
+                liveVDP: biosState.vdp  // This now contains VRAM updates from LDIRVM!
               };
             }
           }
@@ -503,13 +599,29 @@ const App: React.FC = () => {
       // 3. Normal Simulation
       const finalState = simulateLine(
         lineContent,
-        { registers: prev.liveRegisters, flags: prev.liveFlags, memory: prev.liveMemory, vdp: prev.liveVDP },
+        {
+          registers: prev.liveRegisters,
+          flags: prev.liveFlags,
+          memory: prev.liveMemory,
+          vdp: prev.liveVDP,
+          interruptState: prev.interruptState  // Pass current interrupt state
+        },
         prev.analysis.symbolTable,
         prev.analysis.memoryMap || {}
       );
 
       let nextIndex = prev.currentStepIndex + 1;
       let nextCallStack = [...prev.callStack];
+
+      // Sync interrupt state from simulator if it changed
+      let newInterruptState = prev.interruptState;
+      if (finalState.interruptState) {
+        newInterruptState = {
+          ...prev.interruptState,
+          enabled: finalState.interruptState.enabled,
+          mode: finalState.interruptState.mode
+        };
+      }
 
       // Handle Jumps
       if (step.type === StepType.JUMP) {
@@ -565,12 +677,58 @@ const App: React.FC = () => {
       }
 
       if (nextIndex >= prev.analysis.steps.length) {
-        return { ...prev, isPlaying: false, liveRegisters: finalState.registers, liveFlags: finalState.flags, liveMemory: finalState.memory, liveVDP: finalState.vdp };
+        return {
+          ...prev,
+          isPlaying: false,
+          liveRegisters: finalState.registers,
+          liveFlags: finalState.flags,
+          liveMemory: finalState.memory,
+          liveVDP: finalState.vdp,
+          interruptState: newInterruptState
+        };
+      }
+
+      // Update timing state with cycles from this instruction
+      const instructionCycles = finalState.cycles || 0;
+      const newTotalCycles = prev.timingState.totalCycles + instructionCycles;
+      const newCyclesSinceVBlank = prev.timingState.cyclesSinceVBlank + instructionCycles;
+
+      // Check for VBLANK interrupt
+      let frameCount = prev.timingState.frameCount;
+      let cyclesSinceVBlank = newCyclesSinceVBlank;
+      let interruptPending = prev.timingState.interruptPending;
+
+      if (checkVBlankInterrupt(newCyclesSinceVBlank, prev.timingConfig.cyclesPerFrame)) {
+        frameCount++;
+        cyclesSinceVBlank = newCyclesSinceVBlank - prev.timingConfig.cyclesPerFrame;
+
+        // Trigger VBLANK interrupt if interrupts are enabled
+        if (newInterruptState.enabled) {
+          interruptPending = true;
+        }
       }
 
       const nextStep = prev.analysis.steps[nextIndex];
       if (nextStep && prev.breakpoints.has(nextStep.lineNumber)) {
-        return { ...prev, currentStepIndex: nextIndex, isPlaying: false, callStack: nextCallStack, history: historySnapshot, liveRegisters: finalState.registers, liveFlags: finalState.flags, liveMemory: finalState.memory, liveVDP: finalState.vdp };
+        return {
+          ...prev,
+          currentStepIndex: nextIndex,
+          isPlaying: false,
+          callStack: nextCallStack,
+          history: historySnapshot,
+          liveRegisters: finalState.registers,
+          liveFlags: finalState.flags,
+          liveMemory: finalState.memory,
+          liveVDP: finalState.vdp,
+          interruptState: newInterruptState,
+          timingState: {
+            totalCycles: newTotalCycles,
+            cyclesSinceVBlank,
+            frameCount,
+            lastInstructionCycles: instructionCycles,
+            interruptPending
+          }
+        };
       }
 
       return {
@@ -581,7 +739,17 @@ const App: React.FC = () => {
         liveRegisters: finalState.registers,
         liveFlags: finalState.flags,
         liveMemory: finalState.memory,
-        liveVDP: finalState.vdp
+        liveVDP: finalState.vdp,
+        interruptState: newInterruptState,
+        timingState: {
+          totalCycles: newTotalCycles,
+          cyclesSinceVBlank,
+          frameCount,
+          lastInstructionCycles: instructionCycles,
+          interruptPending
+        },
+        isHalted: finalState.halted || false,
+        haltCyclesAccumulated: finalState.halted ? 0 : prev.haltCyclesAccumulated
       };
     });
   };
@@ -769,14 +937,57 @@ const App: React.FC = () => {
     });
   };
 
+  const handleExportROM = () => {
+    if (!appState.analysis) return;
+
+    try {
+      // Get ROM info
+      const info = getROMInfo(appState.analysis.memoryMap);
+
+      // Export ROM
+      const romData = exportToROM(appState.analysis.memoryMap);
+
+      // Generate filename based on loaded file
+      const baseName = appState.fileName?.replace(/\.(asm|z80|txt)$/i, '') || 'output';
+      const filename = `${baseName}.rom`;
+
+      // Download
+      downloadROM(romData, filename);
+
+      console.log(`ROM exported: ${filename}`);
+      console.log(`Size: ${info.size} bytes (${info.usedBytes} used)`);
+      console.log(`Range: $${info.startAddress.toString(16).toUpperCase()} - $${info.endAddress.toString(16).toUpperCase()}`);
+    } catch (error) {
+      console.error('ROM export failed:', error);
+      alert('Failed to export ROM: ' + (error as Error).message);
+    }
+  };
+
   useEffect(() => {
     if (appState.isPlaying) {
-      playIntervalRef.current = window.setInterval(handleStep, 100);
+      playIntervalRef.current = window.setInterval(() => {
+        // Execute multiple steps based on executionSpeed
+        for (let i = 0; i < appState.executionSpeed; i++) {
+          // Check if we should stop (finished or paused)
+          if (!appState.analysis ||
+            appState.currentStepIndex >= appState.analysis.steps.length ||
+            !appState.isPlaying) {
+            setAppState(prev => ({ ...prev, isPlaying: false }));
+            break;
+          }
+
+          // Execute one step (handleStep will check for breakpoints internally)
+          handleStep();
+
+          // Note: handleStep already checks for simple breakpoints and sets isPlaying: false
+          // Advanced breakpoints are also checked during simulation
+        }
+      }, 100); // Keep 100ms interval
     } else if (playIntervalRef.current) {
       clearInterval(playIntervalRef.current);
     }
     return () => { if (playIntervalRef.current) clearInterval(playIntervalRef.current); };
-  }, [appState.isPlaying]);
+  }, [appState.isPlaying, appState.executionSpeed]);
 
   // Auto-load C-BIOS from public/roms on startup
   useEffect(() => {
@@ -805,11 +1016,16 @@ const App: React.FC = () => {
           }}
           onAnalyze={handleAnalyze}
           onTogglePlay={() => setAppState(prev => ({ ...prev, isPlaying: !prev.isPlaying }))}
+          onSpeedChange={(speed) => setAppState(prev => ({ ...prev, executionSpeed: speed }))}
           onToggleEdit={() => setAppState(prev => ({ ...prev, isEditing: !prev.isEditing }))}
           onToggleVDP={() => setAppState(prev => ({ ...prev, showVDP: !prev.showVDP }))}
           onToggleCBios={() => setAppState(prev => ({ ...prev, showCBios: !prev.showCBios }))}
+          onToggleBreakpoints={() => setAppState(prev => ({ ...prev, showBreakpointManager: !prev.showBreakpointManager }))}
+          onToggleWatchlist={() => setAppState(prev => ({ ...prev, showWatchlist: !prev.showWatchlist }))}
+          onToggleTiming={() => setAppState(prev => ({ ...prev, showTiming: !prev.showTiming }))}
           onRegisterChange={handleRegisterChange}
           onRunLoop={handleRunLoop}
+          onExportROM={handleExportROM}
         />
         <CodeViewer
           appState={appState}
@@ -843,6 +1059,59 @@ const App: React.FC = () => {
               }));
             }}
             onClose={() => setAppState(prev => ({ ...prev, showCBios: false }))}
+          />
+        )}
+
+        {/* Breakpoint Manager */}
+        {appState.showBreakpointManager && (
+          <BreakpointManager
+            conditionalBreakpoints={appState.conditionalBreakpoints}
+            memoryWatchpoints={appState.memoryWatchpoints}
+            registerWatchpoints={appState.registerWatchpoints}
+            accessBreakpoints={appState.accessBreakpoints}
+            onUpdateConditional={(bps) => setAppState(prev => ({ ...prev, conditionalBreakpoints: bps }))}
+            onUpdateMemory={(wps) => setAppState(prev => ({ ...prev, memoryWatchpoints: wps }))}
+            onUpdateRegister={(wps) => setAppState(prev => ({ ...prev, registerWatchpoints: wps }))}
+            onUpdateAccess={(bps) => setAppState(prev => ({ ...prev, accessBreakpoints: bps }))}
+            onClose={() => setAppState(prev => ({ ...prev, showBreakpointManager: false }))}
+          />
+        )}
+
+        {/* Watchlist Panel */}
+        {appState.showWatchlist && (
+          <WatchlistPanel
+            watchlist={appState.watchlist}
+            liveRegisters={appState.liveRegisters}
+            liveFlags={appState.liveFlags}
+            liveMemory={appState.liveMemory}
+            symbolTable={appState.analysis?.symbolTable || {}}
+            onAddWatch={(item) => {
+              const newItem: WatchlistItem = {
+                ...item,
+                id: crypto.randomUUID(),
+                previousValue: undefined,
+                currentValue: undefined
+              };
+              setAppState(prev => ({ ...prev, watchlist: [...prev.watchlist, newItem] }));
+            }}
+            onRemoveWatch={(id) => {
+              setAppState(prev => ({
+                ...prev,
+                watchlist: prev.watchlist.filter(w => w.id !== id)
+              }));
+            }}
+            onToggleWatch={(id) => {
+              setAppState(prev => ({
+                ...prev,
+                watchlist: prev.watchlist.map(w =>
+                  w.id === id ? { ...w, enabled: !w.enabled } : w
+                )
+              }));
+            }}
+            onClearAll={() => {
+              setAppState(prev => ({ ...prev, watchlist: [] }));
+            }}
+            onClose={() => setAppState(prev => ({ ...prev, showWatchlist: false }))}
           />
         )}
       </main>
