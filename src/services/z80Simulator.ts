@@ -19,6 +19,7 @@ const parseValue = (valStr: string): number | null => {
   }
 
   try {
+    if (valStr.startsWith('0X')) return parseInt(valStr.substring(2), 16);
     if (valStr.startsWith('#')) return parseInt(valStr.substring(1), 16);
     if (valStr.startsWith('$')) return parseInt(valStr.substring(1), 16);
     if (valStr.startsWith('&H')) return parseInt(valStr.substring(2), 16);
@@ -1129,7 +1130,7 @@ export const simulateLine = (
     if (arg1) {
       // Conditional relative jump: JR cc, e
       const condition = arg0;
-      const offset = resolveValue(arg1);
+      const offset = parseValue(arg1);
       if (offset !== null && checkCondition(condition, nextState.flags)) {
         // Relative offset is signed 8-bit
         const signedOffset = offset > 127 ? offset - 256 : offset;
@@ -1137,7 +1138,7 @@ export const simulateLine = (
       }
     } else {
       // Unconditional relative jump: JR e
-      const offset = resolveValue(arg0);
+      const offset = parseValue(arg0);
       if (offset !== null) {
         // Relative offset is signed 8-bit
         const signedOffset = offset > 127 ? offset - 256 : offset;
@@ -1153,7 +1154,7 @@ export const simulateLine = (
 
     // If B is not zero after decrement, perform relative jump
     if (b !== 0) {
-      const offset = resolveValue(arg0);
+      const offset = parseValue(arg0);
       if (offset !== null) {
         // Relative offset is signed 8-bit
         const signedOffset = offset > 127 ? offset - 256 : offset;
@@ -1461,8 +1462,8 @@ export const simulateLine = (
         } else {
           const high = val & 0xFF;
           const low = nextState.vdp.registerLatch;
-          if ((high & 0xC0) === 0x40) {
-            // Register Write
+          if ((high & 0x80) !== 0) {
+            // Register write (ignore for now)
           } else {
             const addr = ((high & 0x3F) << 8) | low;
             nextState.vdp.addressRegister = addr;
@@ -1520,6 +1521,11 @@ export const executeSubroutine = (
 
     const line = lines[pc - 1];
     const clean = line.split(';')[0].trim();
+    let instr = clean;
+    if (instr.includes(':')) {
+      const parts = instr.split(':');
+      instr = parts[1] ? parts[1].trim() : '';
+    }
 
     if (!clean || clean.endsWith(':') || /^(EQU|ORG|DB|DW|DS|DEFB|DEFW|DEFS|DEFM)/i.test(clean)) {
       pc++;
@@ -1533,11 +1539,11 @@ export const executeSubroutine = (
     // Flow Logic
 
     // CALL
-    if (/^CALL\b/i.test(clean)) {
+    if (/^CALL\b/i.test(instr)) {
       let perform = true;
       // Condition check (if args exist)
-      if (clean.includes(',')) {
-        const parts = clean.substring(4).split(',');
+      if (instr.includes(',')) {
+        const parts = instr.substring(4).split(',');
         if (parts.length > 1) {
           const cond = parts[0].trim();
           // Uses the exhaustive checkCondition list
@@ -1548,7 +1554,7 @@ export const executeSubroutine = (
       }
 
       if (perform) {
-        const parts = clean.substring(4).split(',');
+        const parts = instr.substring(4).split(',');
         const targetLabel = parts[parts.length - 1].trim().toUpperCase();
 
         // If it's a known user label, we jump into it
@@ -1596,17 +1602,17 @@ export const executeSubroutine = (
       }
     }
     // RST (treated as CALL)
-    else if (/^RST\b/i.test(clean)) {
+    else if (/^RST\b/i.test(instr)) {
       // We don't jump into RST vectors (BIOS usually), just simulate effect
     }
 
     // RET / RETI / RETN
-    else if (/^RET/i.test(clean)) {
+    else if (/^RET/i.test(instr)) {
       let perform = true;
       // Check for conditional RET (e.g. RET NZ)
       // But ignore RETI/RETN
-      if (!/^RET[IN]/i.test(clean)) {
-        const cond = clean.substring(3).trim();
+      if (!/^RET[IN]/i.test(instr)) {
+        const cond = instr.substring(3).trim();
         if (cond && !checkCondition(cond, state.flags)) perform = false;
       }
 
@@ -1624,7 +1630,7 @@ export const executeSubroutine = (
     }
 
     // Jumps (JP/JR)
-    else if (/^(JP|JR)\\b/i.test(clean)) {
+    else if (/^(JP|JR)\b/i.test(instr)) {
       // Check if simulateLine set jump properties
       const jumpTarget = (state as any).__jumpTarget;
       const relativeJump = (state as any).__relativeJump;
@@ -1658,8 +1664,8 @@ export const executeSubroutine = (
       }
 
       // Fallback to old logic if properties not set
-      const isJr = clean.toUpperCase().startsWith('JR');
-      const content = clean.substring(isJr ? 2 : 2).trim();
+      const isJr = instr.toUpperCase().startsWith('JR');
+      const content = instr.substring(isJr ? 2 : 2).trim();
       const args = content.split(',');
       let target = args[0];
       let perform = true;
@@ -1725,7 +1731,7 @@ export const executeSubroutine = (
     }
 
     // DJNZ - Decrement and Jump if Not Zero
-    else if (/^DJNZ\\b/i.test(clean)) {
+    else if (/^DJNZ\b/i.test(instr)) {
       // Check if simulateLine set the relativeJump property
       const relativeJump = (state as any).__relativeJump;
 
@@ -1739,7 +1745,7 @@ export const executeSubroutine = (
 
       // Fallback to old logic (B is already decremented by simulateLine)
       if (state.registers.b !== 0) {
-        const target = clean.substring(4).trim();
+        const target = instr.substring(4).trim();
         if (labels[target.toUpperCase()]) {
           pc = labels[target.toUpperCase()];
           steps++;
@@ -1795,6 +1801,11 @@ export const executeLoopUntilCompletion = (
     while (pc <= djnzLine && safetyCounter < MAX_LOOP_ITERATIONS) {
       const line = lines[pc - 1];
       const clean = line.split(';')[0].trim();
+      let instr = clean;
+      if (instr.includes(':')) {
+        const parts = instr.split(':');
+        instr = parts[1] ? parts[1].trim() : '';
+      }
 
       // If we hit the DJNZ itself, we stop this iteration
       if (pc === djnzLine) {
@@ -1814,9 +1825,9 @@ export const executeLoopUntilCompletion = (
       state = simulateLine(line, state, symbolTable, memoryMap);
 
       // Handle internal flow control (Jumps inside the loop body)
-      if (/^(JP|JR)\b/i.test(clean)) {
-        const isJr = clean.toUpperCase().startsWith('JR');
-        const content = clean.substring(isJr ? 2 : 2).trim();
+      if (/^(JP|JR)\b/i.test(instr)) {
+        const isJr = instr.toUpperCase().startsWith('JR');
+        const content = instr.substring(isJr ? 2 : 2).trim();
         const args = content.split(',');
         let target = args[0];
         let perform = true;
@@ -2440,7 +2451,7 @@ export const simulateBiosInstruction = (
           } else {
             const high = val & 0xFF;
             const low = nextState.vdp.registerLatch;
-            if ((high & 0xC0) !== 0x40) {
+            if ((high & 0x80) === 0) {
               const addr = ((high & 0x3F) << 8) | low;
               nextState.vdp.addressRegister = addr;
             }

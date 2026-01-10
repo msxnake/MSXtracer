@@ -205,7 +205,7 @@ const parseLineComponents = (line: string) => {
     return { labels, directive, args };
 };
 
-// Preprocessor to expand REPEAT/ENDR macros (recursive for nested repeats)
+// Preprocessor to expand REPEAT/ENDR and REPT/ENDM macros (recursive for nested repeats)
 const expandRepeatMacros = (code: string): string => {
     let result = code;
     let changed = true;
@@ -224,19 +224,19 @@ const expandRepeatMacros = (code: string): string => {
             const line = lines[i];
             const cleanLine = line.split(';')[0].trim().toUpperCase();
 
-            // Debug: log any line containing REPEAT
-            if (iterations === 1 && cleanLine.includes('REPEAT')) {
+            // Debug: log any line containing repeat directives
+            if (iterations === 1 && (cleanLine.includes('REPEAT') || cleanLine.includes('REPT'))) {
                 console.log(`[Preprocessor] Line ${i}: "${cleanLine}"`);
             }
 
-            // Check for REPEAT directive with support for basic math (e.g. 32*17)
-            const repeatMatch = cleanLine.match(/^REPEAT\s+(.+)/);
+            // Check for REPEAT/REPT directive with support for basic math (e.g. 32*17)
+            const repeatMatch = cleanLine.match(/^(REPEAT|REPT)\s+(.+)/);
             if (repeatMatch) {
                 let repeatCount = 0;
                 try {
                     // Safe evaluation of constant math expressions
                     // Remove any comments that might have slipped through
-                    const expr = repeatMatch[1].split(';')[0].trim();
+                    const expr = repeatMatch[2].split(';')[0].trim();
                     // Basic safety check: only allow numbers, operators *, +, -, /, (, ) and whitespace
                     if (/^[\d\s\+\-\*\/\(\)]+$/.test(expr)) {
                         // eslint-disable-next-line no-eval
@@ -254,10 +254,10 @@ const expandRepeatMacros = (code: string): string => {
                 let nestLevel = 1;
                 while (i < lines.length && nestLevel > 0) {
                     const innerClean = lines[i].split(';')[0].trim().toUpperCase();
-                    if (innerClean.match(/^REPEAT\s+\d+/)) {
+                    if (innerClean.match(/^(REPEAT|REPT)\s+.+/)) {
                         nestLevel++;
                         repeatLines.push(lines[i]);
-                    } else if (innerClean === 'ENDR') {
+                    } else if (innerClean === 'ENDR' || innerClean === 'ENDM') {
                         nestLevel--;
                         if (nestLevel > 0) {
                             repeatLines.push(lines[i]);
@@ -273,8 +273,8 @@ const expandRepeatMacros = (code: string): string => {
                     newLines.push(...repeatLines);
                 }
                 changed = true;
-            } else if (cleanLine === 'ENDR') {
-                // Skip orphan ENDR
+            } else if (cleanLine === 'ENDR' || cleanLine === 'ENDM') {
+                // Skip orphan ENDR/ENDM
                 i++;
             } else {
                 newLines.push(line);
